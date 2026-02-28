@@ -10,7 +10,6 @@ import torch
 class DatasetInterface(abc.ABC):
     def __init__(self, config: dict):
         self.__config = deepcopy(config)
-        self.__config = config
 
     @property
     def config(self):
