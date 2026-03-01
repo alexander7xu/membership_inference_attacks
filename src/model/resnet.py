@@ -1,4 +1,4 @@
-from typing import override
+from typing import override, Iterable
 
 import torch
 from torch import Tensor as T
@@ -44,11 +44,7 @@ class ResNetModel(ModelInterface):
         return dict(logits=logits, loss=loss)
 
     @override
-    def train(
-        self,
-        data_loader: torch.utils.data.DataLoader[dict],
-        num_epochs: int,
-    ) -> dict:
+    def train(self, data_loader: Iterable[dict], num_epochs: int) -> dict:
         self._model.train()
         train_epoch = list[float]()
         train_loss = list[float]()

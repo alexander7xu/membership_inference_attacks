@@ -1,2 +1,2 @@
 from ._attacker_interface import AttackerInterface
-from .rmia import RmiaOfflineAttacker
+from .rmia import RmiaOfflineAttacker, RmiaOnlineAttacker

@@ -1,6 +1,7 @@
 import abc
 from copy import deepcopy
 import logging
+from typing import Iterable
 
 import torch
 from typeguard import typechecked
@@ -35,9 +36,5 @@ class ModelInterface(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def train(
-        self,
-        data_loader: torch.utils.data.DataLoader,
-        num_epochs: int,
-    ) -> dict:
+    def train(self, data_loader: Iterable[dict], num_epochs: int) -> dict:
         pass

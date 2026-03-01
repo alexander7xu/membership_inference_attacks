@@ -42,12 +42,12 @@ class Cifar10Dataset(DatasetInterface):
         return Cifar10Dataset(self.config, _indices=indices)
 
     @override
-    def make_loader(self, shuffle: bool | None = None) -> torch.utils.data.DataLoader:
+    def make_loader(self, **overwrite) -> torch.utils.data.DataLoader:
         generator = torch.Generator("cpu")
         generator.manual_seed(self.config["seed"])
         config = dict(self.config["loader"])
-        if shuffle is not None:
-            config["shuffle"] = shuffle
+        for k, v in overwrite.items():
+            config[k] = v
 
         return torch.utils.data.DataLoader(
             self._dataset,
