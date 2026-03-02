@@ -12,12 +12,13 @@ LOGGER = logging.getLogger("model")
 
 @typechecked
 class ModelInterface(abc.ABC):
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, trained_model_path: str | None):
         self.__config = deepcopy(config)
         self.__device = torch.device(self.config["device"])
         dtype = getattr(torch, self.config["dtype"])
         assert isinstance(dtype, torch.dtype)
         self.__dtype: torch.dtype = dtype
+        self._trained_model_path = trained_model_path
 
     @property
     def config(self):
@@ -36,5 +37,14 @@ class ModelInterface(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def train(self, data_loader: Iterable[dict], num_epochs: int) -> dict:
+    def train(
+        self,
+        num_epochs: int,
+        train_loader: Iterable[dict],
+        eval_loader: Iterable[dict] | None,
+    ) -> dict:
+        pass
+
+    @abc.abstractmethod
+    def save_model(self, model_path: str) -> None:
         pass

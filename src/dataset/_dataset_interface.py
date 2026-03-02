@@ -24,5 +24,5 @@ class DatasetInterface(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def make_loader(self, shuffle: bool) -> torch.utils.data.DataLoader:
+    def make_loader(self, **overwrite_config) -> torch.utils.data.DataLoader:
         pass

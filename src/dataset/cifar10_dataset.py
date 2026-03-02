@@ -1,3 +1,12 @@
+"""
+@misc{krizhevsky2009learning,
+  title={Learning multiple layers of features from tiny images.(2009)},
+  author={Krizhevsky, Alex and Hinton, Geoffrey and others},
+  year={2009}
+}
+"""
+
+
 from typing import override, Iterable
 
 import torch
@@ -42,11 +51,11 @@ class Cifar10Dataset(DatasetInterface):
         return Cifar10Dataset(self.config, _indices=indices)
 
     @override
-    def make_loader(self, **overwrite) -> torch.utils.data.DataLoader:
+    def make_loader(self, **overwrite_config) -> torch.utils.data.DataLoader:
         generator = torch.Generator("cpu")
         generator.manual_seed(self.config["seed"])
         config = dict(self.config["loader"])
-        for k, v in overwrite.items():
+        for k, v in overwrite_config.items():
             config[k] = v
 
         return torch.utils.data.DataLoader(

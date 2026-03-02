@@ -1,3 +1,14 @@
+"""
+@inproceedings{he2016deep,
+  title={Deep residual learning for image recognition},
+  author={He, Kaiming and Zhang, Xiangyu and Ren, Shaoqing and Sun, Jian},
+  booktitle={Proceedings of the IEEE conference on computer vision and pattern recognition},
+  pages={770--778},
+  year={2016}
+}
+"""
+
+
 from typing import override, Iterable
 
 import torch
@@ -12,8 +23,8 @@ from ._model_interface import LOGGER, ModelInterface
 
 @typechecked
 class ResNetModel(ModelInterface):
-    def __init__(self, config: dict):
-        super().__init__(config=config)
+    def __init__(self, config: dict, trained_model_path: str | None):
+        super().__init__(config=config, trained_model_path=trained_model_path)
         resnet_version: str = self.config["resnet_version"]
         assert resnet_version.startswith("resnet")
         backbone = torchvision.models.get_model(
@@ -22,6 +33,8 @@ class ResNetModel(ModelInterface):
         self._model: torchvision.models.ResNet = backbone.eval().to(
             device=self.device, dtype=self.dtype
         )
+        if self._trained_model_path is not None:
+            self._model.load_state_dict(torch.load(self._trained_model_path))
 
         optimizer_name: dict = self.config["optimizer_name"]
         optimizer_cls = getattr(torch.optim, optimizer_name)
@@ -44,13 +57,17 @@ class ResNetModel(ModelInterface):
         return dict(logits=logits, loss=loss)
 
     @override
-    def train(self, data_loader: Iterable[dict], num_epochs: int) -> dict:
+    def train(
+        self,
+        num_epochs: int,
+        train_loader: Iterable[dict],
+        eval_loader: Iterable[dict] | None,
+    ) -> dict:
         self._model.train()
-        train_epoch = list[float]()
-        train_loss = list[float]()
-
+        train_epoch, train_loss = (list[float]() for _ in range(2))
+        eval_epoch, eval_loss = (list[float]() for _ in range(2))
         for epoch in range(num_epochs):
-            for step, data in enumerate(data_loader, 1):
+            for step, data in enumerate(train_loader, 1):
                 outputs = self.inference(data)
                 loss: FP[T, ""] = outputs["loss"]
 
@@ -59,10 +76,29 @@ class ResNetModel(ModelInterface):
                 self._optimizer.step()
 
                 loss = loss.item()
-                epoch_step = step / len(data_loader) + epoch
+                epoch_step = step / len(train_loader) + epoch
                 LOGGER.info(f"training epoch={epoch_step:.3f}/{num_epochs} {loss=:.4e}")
-                train_loss.append(loss)
                 train_epoch.append(epoch_step)
+                train_loss.append(loss)
+
+            if eval_loader is None:
+                continue
+            self._model.eval()
+            sum_eval_loss = 0.0
+            for step, data in enumerate(eval_loader, 1):
+                sum_eval_loss += self.inference(data)["loss"].item()
+            loss = sum_eval_loss / len(eval_loader)
+            eval_epoch.append(float(epoch+1))
+            eval_loss.append(loss)
+            self._model.train()
+            LOGGER.info(f"evaluation epoch={epoch+1}/{num_epochs} {loss=:.4e}")
 
         self._model.eval()
-        return dict(train_epoch=train_epoch, train_loss=train_loss)
+        result = dict(train_epoch=train_epoch, train_loss=train_loss)
+        if eval_loader is not None:
+            result |= dict(eval_epoch=eval_epoch, eval_loss=eval_loss)
+        return result
+
+    @override
+    def save_model(self, model_path: str) -> None:
+        torch.save(self._model.state_dict(), model_path)

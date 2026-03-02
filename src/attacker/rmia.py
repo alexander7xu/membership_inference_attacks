@@ -7,6 +7,7 @@
 }
 """
 
+
 from typing import override
 
 import torch
@@ -76,8 +77,8 @@ class RmiaOfflineAttacker(AttackerInterface):
             : len(self._shadow_dataset) // 2
         ]
         data_loader = self._shadow_dataset.select(indices).make_loader(shuffle=True)
-        model = type(self._target_model)(self._target_model.config)
-        model.train(data_loader, self.config["shadow_model_training_epochs"])
+        model = type(self._target_model)(self._target_model.config, None)
+        model.train(self.config["shadow_model_training_epochs"], data_loader, None)
 
         # calculate probability of true class on population dataset using shadow model
         prob = list[FP[T, "b=_"]]()
@@ -165,13 +166,15 @@ class RmiaOnlineAttacker(AttackerInterface):
                         last_data[i][k] = vv
                 yield torch.utils.data.default_collate(last_data)
         # fmt:on
-        model = type(self._target_model)(self._target_model.config)
-        model.train(_HackDataInLoader(), self.config["shadow_model_training_epochs"])
+        model = type(self._target_model)(self._target_model.config, None)
+        model.train(
+            self.config["shadow_model_training_epochs"], _HackDataInLoader(), None
+        )
         prob_in: FP[T, "b"] = _get_prob(model, query)
 
         # Exclude the target example from the dataset
-        model = type(self._target_model)(self._target_model.config)
-        model.train(data_out_loader, self.config["shadow_model_training_epochs"])
+        model = type(self._target_model)(self._target_model.config, None)
+        model.train(self.config["shadow_model_training_epochs"], data_out_loader, None)
         prob_out: FP[T, "b"] = _get_prob(model, query)
 
         # calculate probability of true class on population dataset using shadow model
