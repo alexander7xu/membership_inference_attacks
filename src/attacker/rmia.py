@@ -24,6 +24,8 @@ from dataset import DatasetInterface
 @torch.no_grad
 def _get_prob(model: ModelInterface, query: dict) -> FP[T, "batch"]:
     outputs = model.inference(query)
+    if "probs" in outputs:
+        return outputs["probs"]
     logits: FP[T, "batch class"] = outputs["logits"]
     labels: Int[T, "batch"] = query["labels"].to(logits.device)
     prob = torch.softmax(logits, -1)
@@ -108,7 +110,7 @@ class RmiaOfflineAttacker(AttackerInterface):
 
         ratio: FP[T, "b S"] = lr_target[:, None] / self._lr_population[None]
         scores: FP[T, "b"] = (ratio > self.config["gamma"]).to(ratio).mean(-1)
-        return dict(scores=scores)
+        return dict(scores=scores, ratio=ratio)
 
 
 @typechecked
