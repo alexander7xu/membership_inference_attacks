@@ -1,3 +1,4 @@
+import argparse
 from copy import deepcopy
 import logging
 from pathlib import Path
@@ -7,7 +8,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 import torch
 
-from attacker import RmiaOfflineAttacker, RmiaOnlineAttacker
+from attacker import load_attacker, AttackerInterface
 from dataset import Cifar10Dataset
 from evaluator import learning_curve, roc
 from model import ResNetModel
@@ -44,20 +45,41 @@ MODEL_CONFIG = {
     },
 }
 
-ATTACKER_CONFIG = {
-    "seed": 42,
-    "population_subset_size": 100,
-    "num_shadow_models": 4,
-    "shadow_model_training_epochs": 10,
-    "gamma": 0.5,
-    "scale_a": 0.3,
+ATTACKER_CONFIGS = {
+    "rmia_offline": {
+        "seed": 42,
+        "population_subset_size": 100,
+        "num_shadow_models": 4,
+        "shadow_model_training_epochs": 10,
+        "gamma": 0.5,
+        "scale_a": 0.3,
+    },
+    "rmia_online": {
+        "seed": 42,
+        "population_subset_size": 100,
+        "num_shadow_models": 4,
+        "shadow_model_training_epochs": 10,
+        "gamma": 0.5,
+        "scale_a": 0.3,
+    },
+    "lira_offline": {
+        "seed": 42,
+        "num_shadow_models": 5,
+        "shadow_model_training_epochs": 10,
+    },
+    "lira_online": {
+        "seed": 42,
+        "num_shadow_models": 5,
+        "shadow_model_training_epochs": 10,
+    },
 }
 
 NUM_MEASUREMENT_SAMPLES = 100
+NUM_AVAILABLE_SHADOW_SAMPLES = None
 MODEL_PATH = Path("./data/training/resnet18_cifar10_10epochs.pth")
 
 
-def load_or_train_target_model():
+def load_or_train_target_model() -> ResNetModel:
     if MODEL_PATH.exists():
         target_model = ResNetModel(MODEL_CONFIG, str(MODEL_PATH))
         return target_model
@@ -81,21 +103,19 @@ def load_or_train_target_model():
 
 
 def perform_attack(
-    attacker: RmiaOfflineAttacker | RmiaOnlineAttacker,
+    attacker: AttackerInterface,
     measurement_train: Cifar10Dataset,
     measurement_val: Cifar10Dataset,
-):
+) -> tuple[list[float], list[int]]:
     scores = list[float]()
-    # Note that it also works with batch_size > 1
-    # In that case, multiple data samples share one shadow model
-    for query in measurement_train.make_loader(batch_size=1):
+    for query in measurement_train.make_loader(batch_size=1, num_workers=1):
         scores += attacker.score(query)["scores"].tolist()
-    for query in measurement_val.make_loader(batch_size=1):
+    for query in measurement_val.make_loader(batch_size=1, num_workers=1):
         scores += attacker.score(query)["scores"].tolist()
-    return scores
+    return scores, [0] * len(measurement_train) + [1] * len(measurement_val)
 
 
-def main():
+def main(args: argparse.Namespace):
     conf = deepcopy(DATASET_CONFIG)
     conf["loader"]["shuffle"] = conf["dataset_kwargs"]["train"] = True
     train_set = Cifar10Dataset(conf)
@@ -113,38 +133,39 @@ def main():
     )
     indices = torch.randperm(len(val_set), generator=generator)
     measurement_val = val_set.select(indices[:NUM_MEASUREMENT_SAMPLES])
-    shadow_set = val_set.select(indices[NUM_MEASUREMENT_SAMPLES:])
 
-    # offline
-    attacker = RmiaOfflineAttacker(
-        ATTACKER_CONFIG,
+    if NUM_AVAILABLE_SHADOW_SAMPLES is None:
+        shadow_set = val_set.select(indices[NUM_MEASUREMENT_SAMPLES:])
+    else:
+        end = max(len(val_set), NUM_AVAILABLE_SHADOW_SAMPLES + NUM_MEASUREMENT_SAMPLES)
+        shadow_set = val_set.select(indices[NUM_MEASUREMENT_SAMPLES:end])
+        del end
+    print("Number of shadow samples:", len(shadow_set))
+
+    attacker = load_attacker(
+        args.attacker,
+        ATTACKER_CONFIGS[args.attacker],
         target_model,
         shadow_dataset=shadow_set,
     )
-    scores = perform_attack(attacker, measurement_train, measurement_val)
+    scores, references = perform_attack(attacker, measurement_train, measurement_val)
     with open(
-        f"./data/attack/rmia-offline_{MODEL_PATH.stem}.txt", "w", encoding="utf-8"
+        f"./data/attack/{args.attacker}_{MODEL_PATH.stem}.txt", "w", encoding="utf-8"
     ) as file:
         file.writelines(f"{x}\n" for x in scores)
-    fig, auc = roc([0] * len(measurement_train) + [1] * len(measurement_val), scores)
-    fig.savefig(f"./data/attack/rmia-offline_{MODEL_PATH.stem}.png")
+    fig, auc = roc(references, scores)
+    fig.savefig(f"./data/attack/{args.attacker}_{MODEL_PATH.stem}.png")
+
+    print(f"Results saved into ./data/attack/{args.attacker}_{MODEL_PATH.stem}")
     print(f"{auc=:.4f}")
 
-    # online
-    attacker = RmiaOnlineAttacker(
-        ATTACKER_CONFIG,
-        target_model,
-        shadow_dataset=shadow_set,
-    )
-    scores = perform_attack(attacker, measurement_train, measurement_val)
-    with open(
-        f"./data/attack/rmia-online_{MODEL_PATH.stem}.txt", "w", encoding="utf-8"
-    ) as file:
-        file.writelines(f"{x}\n" for x in scores)
-    fig, auc = roc([0] * len(measurement_train) + [1] * len(measurement_val), scores)
-    fig.savefig(f"./data/attack/rmia-online_{MODEL_PATH.stem}.png")
-    print(f"{auc=:.4f}")
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("attacker", type=str, choices=ATTACKER_CONFIGS.keys())
+    args = parser.parse_args()
+    return args
 
 
 if __name__ == "__main__":
-    main()
+    main(parse_args())
