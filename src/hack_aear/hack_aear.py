@@ -89,7 +89,7 @@ class HackAearModel(ModelInterface):
     def inference(self, query: dict) -> dict:
         split: str = query["_split"][0]
         probs = torch.stack([self._probs[split][i] for i in query["inputs"]])
-        return {"probs": probs}
+        return {"probs": probs[:, None]}
 
     @override
     def train(
