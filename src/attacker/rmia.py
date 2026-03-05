@@ -7,7 +7,6 @@
 }
 """
 
-
 from typing import override
 
 import torch
@@ -21,16 +20,16 @@ from dataset import DatasetInterface
 
 
 @jaxtyped(typechecker=typechecked)
-@torch.no_grad
 def _get_prob(model: ModelInterface, query: dict) -> FP[T, "batch"]:
     outputs = model.inference(query)
     if "probs" in outputs:
-        return outputs["probs"]
-    logits: FP[T, "batch class"] = outputs["logits"]
-    labels: Int[T, "batch"] = query["labels"].to(logits.device)
-    prob = torch.softmax(logits, -1)
-    prob = torch.gather(prob, -1, labels[..., None]).squeeze(-1)
-    return prob
+        probs: FP[T, "batch class"] = outputs["probs"]
+    else:
+        probs: FP[T, "batch class"] = torch.softmax(outputs["logits"], -1)
+
+    labels: Int[T, "batch"] = query["labels"].to(probs.device)
+    probs: FP[T, "batch"] = torch.gather(probs, -1, labels[..., None]).squeeze(-1)
+    return probs
 
 
 @typechecked
@@ -108,9 +107,9 @@ class RmiaOfflineAttacker(AttackerInterface):
         query_prob_target = _get_prob(self._target_model, query)
         lr_target: FP[T, "b"] = query_prob_target / (query_prob_shadow + 1e-15)
 
-        ratio: FP[T, "b S"] = lr_target[:, None] / self._lr_population[None]
-        scores: FP[T, "b"] = (ratio > self.config["gamma"]).to(ratio).mean(-1)
-        return dict(scores=scores, ratio=ratio)
+        ratios: FP[T, "b S"] = lr_target[:, None] / self._lr_population[None]
+        scores: FP[T, "b"] = (ratios > self.config["gamma"]).to(ratios).mean(-1)
+        return dict(scores=scores, ratios=ratios)
 
 
 @typechecked
@@ -151,6 +150,7 @@ class RmiaOnlineAttacker(AttackerInterface):
             indices[len(self._shadow_dataset) // 2 :]
         ).make_loader(shuffle=True)
 
+        raise NotImplementedError("!!!BUG HERE!!!")
         # Include the target example in the dataset
         # Hacky way to solve BUG https://discuss.pytorch.org/t/error-expected-more-than-1-value-per-channel-when-training/26274
         # fmt:off
@@ -165,7 +165,7 @@ class RmiaOnlineAttacker(AttackerInterface):
                 last_data = [dict() for _ in range(data["labels"].shape[0])]
                 for k, v in data.items():
                     for i, vv in enumerate(v):
-                        last_data[i][k] = vv
+                        last_data[i][k] = torch.cat([vv, query[k]], 0)
                 yield torch.utils.data.default_collate(last_data)
         # fmt:on
         model = type(self._target_model)(self._target_model.config, None)
@@ -190,7 +190,7 @@ class RmiaOnlineAttacker(AttackerInterface):
     @override
     def score(self, query: dict) -> dict:
         prob_in, prob_out, population_prob_shadow = 0, 0, 0
-        for i in range(self.config["num_shadow_models"]):
+        for i in range(1, self.config["num_shadow_models"] + 1):
             LOGGER.info(f"training shadow model {i}/{self.config['num_shadow_models']}")
             p_in, p_out, p_population = self._train_shadow_models(query)
             prob_in = prob_in + p_in
@@ -209,6 +209,6 @@ class RmiaOnlineAttacker(AttackerInterface):
             population_prob_shadow + 1e-15
         )
 
-        ratio: FP[T, "b S"] = lr_target[:, None] / lr_population
-        scores: FP[T, "b"] = (ratio > self.config["gamma"]).to(ratio).mean(-1)
-        return dict(scores=scores)
+        ratios: FP[T, "b S"] = lr_target[:, None] / lr_population
+        scores: FP[T, "b"] = (ratios > self.config["gamma"]).to(ratios).mean(-1)
+        return dict(scores=scores, ratios=ratios)
