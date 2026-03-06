@@ -110,13 +110,10 @@ class LiraOnlineAttacker(AttackerInterface):
         data_in_loader = self._shadow_dataset.select(
             indices[: len(self._shadow_dataset) // 2]
         ).make_loader(shuffle=True)
+        data_out_loader = self._shadow_dataset.select(
+            indices[len(self._shadow_dataset) // 2 :]
+        ).make_loader(shuffle=True)
 
-        batch_size = query["labels"].shape[0]
-        used_samples = torch.randperm(batch_size, generator=self._generator)[
-            : batch_size // 2
-        ]
-
-        raise NotImplementedError("!!!BUG HERE!!!")
         # Include the target example in the dataset
         # Hacky way to solve BUG https://discuss.pytorch.org/t/error-expected-more-than-1-value-per-channel-when-training/26274
         # fmt:off
@@ -128,11 +125,10 @@ class LiraOnlineAttacker(AttackerInterface):
                 for data in it:
                     yield last_data
                     last_data = data
-                last_data = [dict() for _ in range(used_samples)]
+                last_data = dict()
                 for k, v in data.items():
-                    for i, vv in enumerate(v):
-                        last_data[i][k] = vv
-                yield torch.utils.data.default_collate(last_data)
+                    last_data[k] = torch.cat([v, query[k]], 0)
+                yield last_data
         # fmt:on
         model = type(self._target_model)(self._target_model.config, None)
         model.train(
@@ -170,5 +166,116 @@ class LiraOnlineAttacker(AttackerInterface):
         )
         log_ratios = logp_in - logp_out
 
+        # scores = torch.exp(log_ratios)
+        return dict(scores=log_ratios)
+
+
+@typechecked
+class LiraOnlineAttackerV2(AttackerInterface):
+    @jaxtyped(typechecker=typechecked)
+    def __init__(
+        self,
+        config: dict,
+        target_model: ModelInterface,
+        *,
+        shadow_dataset: DatasetInterface,
+        **_,
+    ):
+        super().__init__(config, target_model)
+        self._shadow_dataset = shadow_dataset
+        assert self.config["num_shadow_models"] >= 4
+
+        self._generator = torch.Generator("cpu")
+        self._generator.manual_seed(self.config["seed"])
+
+    @jaxtyped(typechecker=typechecked)
+    def _train_shadow_models(self, query: dict, query_permutation: int):
+        # randomly select half of the shadow dataset
+        indices = torch.randperm(len(self._shadow_dataset), generator=self._generator)
+        data_loader = self._shadow_dataset.select(
+            indices[: len(self._shadow_dataset) // 2]
+        ).make_loader(shuffle=True)
+
+        # randomly select half of the query
+        batch_size = query["labels"].shape[0]
+        assert batch_size > 1
+        assert query_permutation >= 0
+        if query_permutation > 3:
+            query_indices = torch.randperm(batch_size, generator=self._generator)
+            indices_used = query_indices[: batch_size // 2].tolist()
+            indices_unused = query_indices[batch_size // 2 :].tolist()
+        else:
+            query_indices = torch.arange(batch_size).tolist()
+            quarters = [query_indices[i::4] for i in range(4)]
+            # 0: [[0, 2], [1, 3]]; 1: [[1, 2], [1,3]]; 2: [[0, 3], [1, 2]]; 3: [[1, 3], [0, 2]]
+            indices_used = (
+                quarters[query_permutation & 1] + quarters[query_permutation >> 1 | 2]
+            )
+            indices_unused = (
+                quarters[1 - (query_permutation & 1)]
+                + quarters[3 - (query_permutation >> 1)]
+            )
+
+        used_query = {
+            k: torch.stack([v[i] for i in indices_used], 0) for k, v in query.items()
+        }
+        unused_query = {
+            k: torch.stack([v[i] for i in indices_unused], 0) for k, v in query.items()
+        }
+
+        # Include the target example in the dataset
+        # fmt:off
+        class _HackDataInLoader:
+            def __len__(self): return len(data_loader) + 1
+            def __iter__(self):
+                yield from iter(data_loader)
+                data = list[dict]()
+                for i in range(len(indices_used)):
+                    data.append(dict())
+                    for k, v in used_query.items():
+                        data[-1][k] = v[i]
+                yield torch.utils.data.default_collate(data)
+        # fmt:on
+
+        model = type(self._target_model)(self._target_model.config, None)
+        model.train(
+            self.config["shadow_model_training_epochs"], _HackDataInLoader(), None
+        )
+        loss_used: FP[T, "b"] = phi_stable(model, used_query)
+        loss_unused: FP[T, "b"] = phi_stable(model, unused_query)
+
+        return loss_used, loss_unused, indices_used, indices_unused
+
+    @jaxtyped(typechecker=typechecked)
+    @override
+    def score(self, query: dict) -> dict:
+        sums = torch.zeros(
+            query["labels"].shape[0], 4, device=self._target_model.device
+        )
+        cnts_in = torch.zeros(sums.shape[0], dtype=int, device=sums.device)
+        for i in range(1, self.config["num_shadow_models"] + 1):
+            LOGGER.info(f"training shadow model {i}/{self.config['num_shadow_models']}")
+            l_in, l_out, idx_in, idx_out = self._train_shadow_models(query, i - 1)
+            cnts_in[idx_in] += 1
+            sums[idx_in, 0] += l_in
+            sums[idx_in, 1] += l_in**2
+            sums[idx_out, 2] += l_out
+            sums[idx_out, 3] += l_out**2
+        # FP[T, "b"]
+        cnts_out = self.config["num_shadow_models"] - cnts_in
+        assert torch.all(cnts_in > 0) and torch.all(cnts_out > 0)
+        mean_in = sums[:, 0] / cnts_in
+        mean_out = sums[:, 2] / cnts_out
+        std_in = torch.sqrt(sums[:, 1] / cnts_in - mean_in**2)
+        std_out = torch.sqrt(sums[:, 3] / cnts_out - mean_out**2)
+
+        loss_target: FP[T, "b"] = phi_stable(self._target_model, query)
+        logp_in = torch.distributions.Normal(loc=mean_in, scale=std_in).log_prob(
+            loss_target
+        )
+        logp_out = torch.distributions.Normal(loc=mean_out, scale=std_out).log_prob(
+            loss_target
+        )
+        log_ratios = logp_in - logp_out
         # scores = torch.exp(log_ratios)
         return dict(scores=log_ratios)

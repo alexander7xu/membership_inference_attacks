@@ -76,6 +76,7 @@ ATTACKER_CONFIGS = {
 
 NUM_MEASUREMENT_SAMPLES = 100
 NUM_AVAILABLE_SHADOW_SAMPLES = None
+ATTACK_BATCH_SIZE = 1
 MODEL_PATH = Path("./data/training/resnet18_cifar10_10epochs.pth")
 
 
@@ -108,9 +109,13 @@ def perform_attack(
     measurement_val: Cifar10Dataset,
 ) -> tuple[list[float], list[int]]:
     scores = list[float]()
-    for query in measurement_train.make_loader(batch_size=1, num_workers=1):
+    for query in measurement_train.make_loader(
+        batch_size=ATTACK_BATCH_SIZE, num_workers=1
+    ):
         scores += attacker.score(query)["scores"].tolist()
-    for query in measurement_val.make_loader(batch_size=1, num_workers=1):
+    for query in measurement_val.make_loader(
+        batch_size=ATTACK_BATCH_SIZE, num_workers=1
+    ):
         scores += attacker.score(query)["scores"].tolist()
     return scores, [0] * len(measurement_train) + [1] * len(measurement_val)
 
@@ -149,14 +154,18 @@ def main(args: argparse.Namespace):
         shadow_dataset=shadow_set,
     )
     scores, references = perform_attack(attacker, measurement_train, measurement_val)
-    with open(
-        f"./data/attack/{args.attacker}_{MODEL_PATH.stem}.txt", "w", encoding="utf-8"
-    ) as file:
+
+    save_path_stem = Path(
+        f"./data/attack/{args.attacker.replace('_', '-')}_{MODEL_PATH.stem.replace('_', '-')}"
+    )
+    save_path_stem.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(f"{save_path_stem}.txt", "w", encoding="utf-8") as file:
         file.writelines(f"{x}\n" for x in scores)
     fig, auc = roc(references, scores)
-    fig.savefig(f"./data/attack/{args.attacker}_{MODEL_PATH.stem}.png")
+    fig.savefig(f"{save_path_stem}.png")
 
-    print(f"Results saved into ./data/attack/{args.attacker}_{MODEL_PATH.stem}")
+    print(f"Results saved into {save_path_stem}")
     print(f"{auc=:.4f}")
 
 

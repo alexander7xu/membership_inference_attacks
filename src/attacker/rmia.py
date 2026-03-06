@@ -150,7 +150,6 @@ class RmiaOnlineAttacker(AttackerInterface):
             indices[len(self._shadow_dataset) // 2 :]
         ).make_loader(shuffle=True)
 
-        raise NotImplementedError("!!!BUG HERE!!!")
         # Include the target example in the dataset
         # Hacky way to solve BUG https://discuss.pytorch.org/t/error-expected-more-than-1-value-per-channel-when-training/26274
         # fmt:off
@@ -162,11 +161,10 @@ class RmiaOnlineAttacker(AttackerInterface):
                 for data in it:
                     yield last_data
                     last_data = data
-                last_data = [dict() for _ in range(data["labels"].shape[0])]
+                last_data = dict()
                 for k, v in data.items():
-                    for i, vv in enumerate(v):
-                        last_data[i][k] = torch.cat([vv, query[k]], 0)
-                yield torch.utils.data.default_collate(last_data)
+                    last_data[k] = torch.cat([v, query[k]], 0)
+                yield last_data
         # fmt:on
         model = type(self._target_model)(self._target_model.config, None)
         model.train(
