@@ -3,7 +3,8 @@ from typing import Iterable
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from sklearn.metrics import roc_curve, auc
-from typeguard import typechecked
+
+from src.utils.annotation import typechecked
 
 
 @typechecked

@@ -1,2 +1,2 @@
-from ._model_interface import ModelInterface
-from .resnet import ResNetModel
+from src.model.interface import ModelInterface, load_model
+from src.model import torchvision_model

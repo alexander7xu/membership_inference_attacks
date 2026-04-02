@@ -2,26 +2,27 @@ import argparse
 from copy import deepcopy
 import logging
 from pathlib import Path
-import sys
-
-sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 import torch
 
-from attacker import load_attacker, AttackerInterface
-from dataset import Cifar10Dataset
-from evaluator import learning_curve, roc
-from model import ResNetModel
+from src.attacker import AttackerInterface, load_attacker
+from src.dataset import DatasetInterface, load_dataset
+from src.evaluator import learning_curve, roc
+from src.model import ModelInterface, load_model
+from src.utils import make_config_from_dict
 
 
 logging.basicConfig(level=logging.INFO)
 
 
 DATASET_CONFIG = {
+    "type": "TorchvisionDataset",
     "seed": 42,
-    "loader": {
+    "dataset_class": "CIFAR10",
+    "dataloader_kwargs": {
         "batch_size": 1024,
         "num_workers": 8,
+        "persistent_workers": True,
         "pin_memory": True,
         "shuffle": None,
     },
@@ -33,10 +34,11 @@ DATASET_CONFIG = {
 }
 
 MODEL_CONFIG = {
+    "type": "TorchvisionModel",
     "device": "cuda",
     "dtype": "float",
     "optimizer_name": "Adam",
-    "resnet_version": "resnet18",
+    "model_version": "resnet18",
     "model_kwargs": {
         "num_classes": 10,
     },
@@ -46,7 +48,8 @@ MODEL_CONFIG = {
 }
 
 ATTACKER_CONFIGS = {
-    "rmia_offline": {
+    "RmiaOffline": {
+        "type": "RmiaOfflineAttacker",
         "seed": 42,
         "population_subset_size": 100,
         "num_shadow_models": 4,
@@ -54,7 +57,8 @@ ATTACKER_CONFIGS = {
         "gamma": 0.5,
         "scale_a": 0.3,
     },
-    "rmia_online": {
+    "RmiaOnline": {
+        "type": "RmiaOnlineAttacker",
         "seed": 42,
         "population_subset_size": 100,
         "num_shadow_models": 4,
@@ -62,12 +66,14 @@ ATTACKER_CONFIGS = {
         "gamma": 0.5,
         "scale_a": 0.3,
     },
-    "lira_offline": {
+    "LiraOffline": {
+        "type": "LiraOfflineAttacker",
         "seed": 42,
         "num_shadow_models": 5,
         "shadow_model_training_epochs": 10,
     },
-    "lira_online": {
+    "LiraOnline": {
+        "type": "LiraOnlineAttacker",
         "seed": 42,
         "num_shadow_models": 5,
         "shadow_model_training_epochs": 10,
@@ -80,21 +86,21 @@ ATTACK_BATCH_SIZE = 1
 MODEL_PATH = Path("./data/training/resnet18_cifar10_10epochs.pth")
 
 
-def load_or_train_target_model() -> ResNetModel:
+def load_or_train_target_model() -> ModelInterface:
     if MODEL_PATH.exists():
-        target_model = ResNetModel(MODEL_CONFIG, str(MODEL_PATH))
+        target_model = load_model(make_config_from_dict(MODEL_CONFIG), str(MODEL_PATH))
         return target_model
 
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
 
-    target_model = ResNetModel(MODEL_CONFIG, None)
+    target_model = load_model(make_config_from_dict(MODEL_CONFIG), None)
     conf = deepcopy(DATASET_CONFIG)
-    conf["loader"]["shuffle"] = conf["dataset_kwargs"]["train"] = True
-    train_set = Cifar10Dataset(conf)
+    conf["dataloader_kwargs"]["shuffle"] = conf["dataset_kwargs"]["train"] = True
+    train_set = load_dataset(make_config_from_dict(conf))
     conf = deepcopy(DATASET_CONFIG)
-    conf["loader"]["shuffle"] = conf["dataset_kwargs"]["train"] = False
-    val_set = Cifar10Dataset(conf)
+    conf["dataloader_kwargs"]["shuffle"] = conf["dataset_kwargs"]["train"] = False
+    val_set = load_dataset(make_config_from_dict(conf))
 
     history = target_model.train(10, train_set.make_loader(), val_set.make_loader())
     fig = learning_curve(history)
@@ -105,8 +111,8 @@ def load_or_train_target_model() -> ResNetModel:
 
 def perform_attack(
     attacker: AttackerInterface,
-    measurement_train: Cifar10Dataset,
-    measurement_val: Cifar10Dataset,
+    measurement_train: DatasetInterface,
+    measurement_val: DatasetInterface,
 ) -> tuple[list[float], list[int]]:
     scores = list[float]()
     for query in measurement_train.make_loader(
@@ -122,17 +128,16 @@ def perform_attack(
 
 def main(args: argparse.Namespace):
     conf = deepcopy(DATASET_CONFIG)
-    conf["loader"]["shuffle"] = conf["dataset_kwargs"]["train"] = True
-    train_set = Cifar10Dataset(conf)
-    conf["loader"]["shuffle"] = conf["dataset_kwargs"]["train"] = False
-    val_set = Cifar10Dataset(conf)
+    conf["dataloader_kwargs"]["shuffle"] = conf["dataset_kwargs"]["train"] = True
+    train_set = load_dataset(make_config_from_dict(conf))
+    conf["dataloader_kwargs"]["shuffle"] = conf["dataset_kwargs"]["train"] = False
+    val_set = load_dataset(make_config_from_dict(conf))
     target_model = load_or_train_target_model()
 
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
 
-    generator = torch.Generator("cpu")
-    generator.manual_seed(42)
+    generator = torch.Generator("cpu").manual_seed(42)
     measurement_train = train_set.select(
         torch.randperm(len(train_set), generator=generator)[:NUM_MEASUREMENT_SAMPLES]
     )
@@ -148,8 +153,7 @@ def main(args: argparse.Namespace):
     print("Number of shadow samples:", len(shadow_set))
 
     attacker = load_attacker(
-        args.attacker,
-        ATTACKER_CONFIGS[args.attacker],
+        make_config_from_dict(ATTACKER_CONFIGS[args.attacker]),
         target_model,
         shadow_dataset=shadow_set,
     )

@@ -12,16 +12,19 @@
 from typing import override
 
 import torch
-from torch import Tensor as T
-from jaxtyping import jaxtyped, Int
-from jaxtyping import Float as FP
-from typeguard import typechecked
 
-from ._attacker_interface import LOGGER, AttackerInterface, ModelInterface
-from dataset import DatasetInterface
+from src.attacker.interface import (
+    LOGGER,
+    AttackerInterface,
+    ModelInterface,
+    _AttackerConfigBase,
+)
+from src.dataset import DatasetInterface
+from src.utils.annotation import T, FP, Int, typechecked, tensor_typechecked
 
 
-@jaxtyped(typechecker=typechecked)
+@torch.no_grad
+@tensor_typechecked
 def phi_stable(model: ModelInterface, query: dict) -> FP[T, "batch"]:
     outputs = model.inference(query)
     if "probs" in outputs:
@@ -37,12 +40,19 @@ def phi_stable(model: ModelInterface, query: dict) -> FP[T, "batch"]:
     return phi
 
 
+class LiraOfflineAttackerConfig(_AttackerConfigBase):
+    num_shadow_models: int
+    shadow_model_training_epochs: int
+
+
 @typechecked
 class LiraOfflineAttacker(AttackerInterface):
-    @jaxtyped(typechecker=typechecked)
+    config: LiraOfflineAttackerConfig
+
+    @tensor_typechecked
     def __init__(
         self,
-        config: dict,
+        config: LiraOfflineAttackerConfig,
         target_model: ModelInterface,
         *,
         shadow_dataset: DatasetInterface,
@@ -51,26 +61,25 @@ class LiraOfflineAttacker(AttackerInterface):
         super().__init__(config, target_model)
         self._shadow_dataset = shadow_dataset
 
-        self._generator = torch.Generator("cpu")
-        self._generator.manual_seed(self.config["seed"])
+        self._generator = torch.Generator("cpu").manual_seed(self.config.seed)
         self._shadow_models = list[ModelInterface]()
-        for i in range(1, self.config["num_shadow_models"] + 1):
-            LOGGER.info(f"training shadow model {i}/{self.config['num_shadow_models']}")
-            model = self._train_shadow_models()
+        for i in range(1, self.config.num_shadow_models + 1):
+            LOGGER.info(f"training shadow model {i}/{self.config.num_shadow_models}")
+            model = self._train_shadow_model()
             self._shadow_models.append(model)
 
-    @jaxtyped(typechecker=typechecked)
-    def _train_shadow_models(self):
+    @tensor_typechecked
+    def _train_shadow_model(self):
         # randomly select half of the shadow dataset to train a shadow model
         indices = torch.randperm(len(self._shadow_dataset), generator=self._generator)
         data_loader = self._shadow_dataset.select(
             indices[: len(self._shadow_dataset) // 2]
         ).make_loader(shuffle=True)
-        model = type(self._target_model)(self._target_model.config, None)
-        model.train(self.config["shadow_model_training_epochs"], data_loader, None)
+        model = self._target_model.make_shadow()
+        model.train(self.config.shadow_model_training_epochs, data_loader, None)
         return model
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     @override
     def score(self, query: dict) -> dict:
         loss_out = list[float]()
@@ -86,12 +95,19 @@ class LiraOfflineAttacker(AttackerInterface):
         return dict(scores=scores)
 
 
+class LiraOnlineAttackerConfig(_AttackerConfigBase):
+    num_shadow_models: int
+    shadow_model_training_epochs: int
+
+
 @typechecked
 class LiraOnlineAttacker(AttackerInterface):
-    @jaxtyped(typechecker=typechecked)
+    config: LiraOnlineAttackerConfig
+
+    @tensor_typechecked
     def __init__(
         self,
-        config: dict,
+        config: LiraOnlineAttackerConfig,
         target_model: ModelInterface,
         *,
         shadow_dataset: DatasetInterface,
@@ -100,10 +116,9 @@ class LiraOnlineAttacker(AttackerInterface):
         super().__init__(config, target_model)
         self._shadow_dataset = shadow_dataset
 
-        self._generator = torch.Generator("cpu")
-        self._generator.manual_seed(self.config["seed"])
+        self._generator = torch.Generator("cpu").manual_seed(self.config.seed)
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     def _train_shadow_models(self, query: dict):
         # randomly select half of the shadow dataset to train a shadow model
         indices = torch.randperm(len(self._shadow_dataset), generator=self._generator)
@@ -130,25 +145,23 @@ class LiraOnlineAttacker(AttackerInterface):
                     last_data[k] = torch.cat([v, query[k]], 0)
                 yield last_data
         # fmt:on
-        model = type(self._target_model)(self._target_model.config, None)
-        model.train(
-            self.config["shadow_model_training_epochs"], _HackDataInLoader(), None
-        )
+        model = self._target_model.make_shadow()
+        model.train(self.config.shadow_model_training_epochs, _HackDataInLoader(), None)
         loss_in: FP[T, "b"] = phi_stable(model, query)
 
         # Exclude the target example from the dataset
-        model = type(self._target_model)(self._target_model.config, None)
-        model.train(self.config["shadow_model_training_epochs"], data_out_loader, None)
+        model = self._target_model.make_shadow()
+        model.train(self.config.shadow_model_training_epochs, data_out_loader, None)
         loss_out: FP[T, "b"] = phi_stable(model, query)
 
         return loss_in, loss_out
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     @override
     def score(self, query: dict) -> dict:
         loss_in, loss_out = list[float](), list[float]()
-        for i in range(1, self.config["num_shadow_models"] + 1):
-            LOGGER.info(f"training shadow model {i}/{self.config['num_shadow_models']}")
+        for i in range(1, self.config.num_shadow_models + 1):
+            LOGGER.info(f"training shadow model {i}/{self.config.num_shadow_models}")
             l_in, l_out = self._train_shadow_models(query)
             loss_in.append(l_in)
             loss_out.append(l_out)
@@ -170,12 +183,19 @@ class LiraOnlineAttacker(AttackerInterface):
         return dict(scores=log_ratios)
 
 
+class LiraOnlineAttackerV2Config(_AttackerConfigBase):
+    num_shadow_models: int
+    shadow_model_training_epochs: int
+
+
 @typechecked
 class LiraOnlineAttackerV2(AttackerInterface):
-    @jaxtyped(typechecker=typechecked)
+    config: LiraOnlineAttackerV2Config
+
+    @tensor_typechecked
     def __init__(
         self,
-        config: dict,
+        config: LiraOnlineAttackerV2Config,
         target_model: ModelInterface,
         *,
         shadow_dataset: DatasetInterface,
@@ -183,12 +203,11 @@ class LiraOnlineAttackerV2(AttackerInterface):
     ):
         super().__init__(config, target_model)
         self._shadow_dataset = shadow_dataset
-        assert self.config["num_shadow_models"] >= 4
+        assert self.config.num_shadow_models >= 4
 
-        self._generator = torch.Generator("cpu")
-        self._generator.manual_seed(self.config["seed"])
+        self._generator = torch.Generator("cpu").manual_seed(self.config.seed)
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     def _train_shadow_models(self, query: dict, query_permutation: int):
         # randomly select half of the shadow dataset
         indices = torch.randperm(len(self._shadow_dataset), generator=self._generator)
@@ -237,24 +256,22 @@ class LiraOnlineAttackerV2(AttackerInterface):
                 yield torch.utils.data.default_collate(data)
         # fmt:on
 
-        model = type(self._target_model)(self._target_model.config, None)
-        model.train(
-            self.config["shadow_model_training_epochs"], _HackDataInLoader(), None
-        )
+        model = self._target_model.make_shadow()
+        model.train(self.config.shadow_model_training_epochs, _HackDataInLoader(), None)
         loss_used: FP[T, "b"] = phi_stable(model, used_query)
         loss_unused: FP[T, "b"] = phi_stable(model, unused_query)
 
         return loss_used, loss_unused, indices_used, indices_unused
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     @override
     def score(self, query: dict) -> dict:
         sums = torch.zeros(
             query["labels"].shape[0], 4, device=self._target_model.device
         )
         cnts_in = torch.zeros(sums.shape[0], dtype=int, device=sums.device)
-        for i in range(1, self.config["num_shadow_models"] + 1):
-            LOGGER.info(f"training shadow model {i}/{self.config['num_shadow_models']}")
+        for i in range(1, self.config.num_shadow_models + 1):
+            LOGGER.info(f"training shadow model {i}/{self.config.num_shadow_models}")
             l_in, l_out, idx_in, idx_out = self._train_shadow_models(query, i - 1)
             cnts_in[idx_in] += 1
             sums[idx_in, 0] += l_in
@@ -262,7 +279,7 @@ class LiraOnlineAttackerV2(AttackerInterface):
             sums[idx_out, 2] += l_out
             sums[idx_out, 3] += l_out**2
         # FP[T, "b"]
-        cnts_out = self.config["num_shadow_models"] - cnts_in
+        cnts_out = self.config.num_shadow_models - cnts_in
         assert torch.all(cnts_in > 0) and torch.all(cnts_out > 0)
         mean_in = sums[:, 0] / cnts_in
         mean_out = sums[:, 2] / cnts_out

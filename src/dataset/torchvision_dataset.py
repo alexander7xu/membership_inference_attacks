@@ -6,20 +6,28 @@
 }
 """
 
-
 from typing import override, Iterable
 
 import torch
 import torchvision
 
-from ._dataset_interface import DatasetInterface
+from src.dataset.interface import DatasetInterface, _DatasetConfigBase
 
 
-class _WrapTorchvisionDatasetCIFAR10:
-    def __init__(self, indices: Iterable[int] | None, **dataset_kwargs):
-        self._dataset = torchvision.datasets.CIFAR10(**dataset_kwargs)
+class TorchvisionDatasetConfig(_DatasetConfigBase):
+    dataset_class: str
+    dataset_kwargs: dict
+    dataloader_kwargs: dict
+    pass
+
+
+class _WrapTorchvisionDataset:
+    def __init__(
+        self, dataset_class: type, indices: Iterable[int] | None, **dataset_kwargs
+    ):
+        self._dataset = dataset_class(**dataset_kwargs)
         if indices is None:
-            indices = list(range(len(self._dataset)))
+            indices = range(len(self._dataset))
         self._indices = list(indices)
         self._transform = torchvision.transforms.Compose([
             torchvision.transforms.ToTensor(),
@@ -35,11 +43,14 @@ class _WrapTorchvisionDatasetCIFAR10:
         return dict(inputs=inputs, labels=target)
 
 
-class Cifar10Dataset(DatasetInterface):
-    def __init__(self, config: dict, *, _indices: Iterable[int] | None = None):
+class TorchvisionDataset(DatasetInterface):
+    config: TorchvisionDatasetConfig
+
+    def __init__(self, config: dict, *, _indices: Iterable[int] | None = None, **_):
         super().__init__(config)
-        self._dataset = _WrapTorchvisionDatasetCIFAR10(
-            _indices, **self.config["dataset_kwargs"]
+        dataset_class = getattr(torchvision.datasets, self.config.dataset_class)
+        self._dataset = _WrapTorchvisionDataset(
+            dataset_class, _indices, **self.config.dataset_kwargs
         )
 
     @override
@@ -47,14 +58,13 @@ class Cifar10Dataset(DatasetInterface):
         return len(self._dataset)
 
     @override
-    def select(self, indices: Iterable[int]) -> "Cifar10Dataset":
-        return Cifar10Dataset(self.config, _indices=indices)
+    def select(self, indices: Iterable[int]) -> "TorchvisionDataset":
+        return TorchvisionDataset(self.config, _indices=indices)
 
     @override
     def make_loader(self, **overwrite_config) -> torch.utils.data.DataLoader:
-        generator = torch.Generator("cpu")
-        generator.manual_seed(self.config["seed"])
-        config = dict(self.config["loader"])
+        generator = torch.Generator("cpu").manual_seed(self.config.seed)
+        config = self.config.dataloader_kwargs
         for k, v in overwrite_config.items():
             config[k] = v
 

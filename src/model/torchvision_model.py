@@ -8,49 +8,50 @@
 }
 """
 
-
 from typing import override, Iterable
 
 import torch
-from torch import Tensor as T
 import torchvision
-from jaxtyping import jaxtyped, Int
-from jaxtyping import Float as FP
-from typeguard import typechecked
 
-from ._model_interface import LOGGER, ModelInterface
+from src.model.interface import LOGGER, ModelInterface, _ModelConfigBase
+from src.utils.annotation import T, FP, Int, typechecked, tensor_typechecked
+
+
+class TorchvisionModelConfig(_ModelConfigBase):
+    model_version: str
+    model_kwargs: dict
+    optimizer_name: str
+    optimizer_kwargs: dict
 
 
 @typechecked
-class ResNetModel(ModelInterface):
-    def __init__(self, config: dict, trained_model_path: str | None):
+class TorchvisionModel(ModelInterface):
+    config: TorchvisionModelConfig
+
+    def __init__(self, config: TorchvisionModelConfig, trained_model_path: str | None, **_):
         super().__init__(config=config, trained_model_path=trained_model_path)
-        resnet_version: str = self.config["resnet_version"]
-        assert resnet_version.startswith("resnet")
         backbone = torchvision.models.get_model(
-            resnet_version, **self.config["model_kwargs"]
+            self.config.model_version, **self.config.model_kwargs
         )
-        self._model: torchvision.models.ResNet = backbone.eval().to(
-            device=self.device, dtype=self.dtype
-        )
+        self._model = backbone.eval().to(device=self.device, dtype=self.dtype)
         if self._trained_model_path is not None:
             self._model.load_state_dict(torch.load(self._trained_model_path))
 
-        optimizer_name: dict = self.config["optimizer_name"]
+        optimizer_name: dict = self.config.optimizer_name
         optimizer_cls = getattr(torch.optim, optimizer_name)
         assert issubclass(optimizer_cls, torch.optim.Optimizer)
         self._optimizer = optimizer_cls(
-            self._model.parameters(), **self.config["optimizer_kwargs"]
+            self._model.parameters(), **self.config.optimizer_kwargs
         )
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     @override
     def inference(self, query: dict) -> dict:
         inputs: FP[T, "b 3 h w"] = query["inputs"].to(
             device=self.device, dtype=self.dtype
         )
         labels: Int[T, "b"] | None = query["labels"].to(device=self.device)
-        logits: FP[T, "b c"] = self._model.forward(inputs)
+        logits: FP[T, "b c"] = self._model(inputs)
         loss = None
         if labels is not None:
             loss = torch.nn.functional.cross_entropy(logits, labels)
@@ -88,7 +89,7 @@ class ResNetModel(ModelInterface):
             for step, data in enumerate(eval_loader, 1):
                 sum_eval_loss += self.inference(data)["loss"].item()
             loss = sum_eval_loss / len(eval_loader)
-            eval_epoch.append(float(epoch+1))
+            eval_epoch.append(float(epoch + 1))
             eval_loss.append(loss)
             self._model.train()
             LOGGER.info(f"evaluation epoch={epoch+1}/{num_epochs} {loss=:.4e}")
@@ -96,7 +97,7 @@ class ResNetModel(ModelInterface):
         self._model.eval()
         result = dict(train_epoch=train_epoch, train_loss=train_loss)
         if eval_loader is not None:
-            result |= dict(eval_epoch=eval_epoch, eval_loss=eval_loss)
+            result.update(dict(eval_epoch=eval_epoch, eval_loss=eval_loss))
         return result
 
     @override

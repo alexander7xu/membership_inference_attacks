@@ -10,16 +10,19 @@
 from typing import override
 
 import torch
-from torch import Tensor as T
-from jaxtyping import jaxtyped, Int
-from jaxtyping import Float as FP
-from typeguard import typechecked
 
-from ._attacker_interface import LOGGER, AttackerInterface, ModelInterface
-from dataset import DatasetInterface
+from src.attacker.interface import (
+    LOGGER,
+    AttackerInterface,
+    ModelInterface,
+    _AttackerConfigBase,
+)
+from src.dataset import DatasetInterface
+from src.utils.annotation import T, FP, Int, typechecked, tensor_typechecked
 
 
-@jaxtyped(typechecker=typechecked)
+@torch.no_grad
+@tensor_typechecked
 def _get_prob(model: ModelInterface, query: dict) -> FP[T, "batch"]:
     outputs = model.inference(query)
     if "probs" in outputs:
@@ -32,12 +35,22 @@ def _get_prob(model: ModelInterface, query: dict) -> FP[T, "batch"]:
     return probs
 
 
+class RmiaOfflineAttackerConfig(_AttackerConfigBase):
+    population_subset_size: int
+    num_shadow_models: int
+    shadow_model_training_epochs: int
+    scale_a: float
+    gamma: float
+
+
 @typechecked
 class RmiaOfflineAttacker(AttackerInterface):
-    @jaxtyped(typechecker=typechecked)
+    config: RmiaOfflineAttackerConfig
+
+    @tensor_typechecked
     def __init__(
         self,
-        config: dict,
+        config: RmiaOfflineAttackerConfig,
         target_model: ModelInterface,
         *,
         shadow_dataset: DatasetInterface,
@@ -46,18 +59,17 @@ class RmiaOfflineAttacker(AttackerInterface):
         super().__init__(config, target_model)
         self._shadow_dataset = shadow_dataset
 
-        self._generator = torch.Generator("cpu")
-        self._generator.manual_seed(self.config["seed"])
+        self._generator = torch.Generator("cpu").manual_seed(self.config.seed)
         indices = torch.randperm(len(self._shadow_dataset), generator=self._generator)
         self._population_data_loader = self._shadow_dataset.select(
-            indices[: self.config["population_subset_size"]]
+            indices[: self.config.population_subset_size]
         ).make_loader(shuffle=False)
 
         self._shadow_models = list[ModelInterface]()
         pr_z = 0
-        for i in range(1, self.config["num_shadow_models"] + 1):
-            LOGGER.info(f"training shadow model {i}/{self.config['num_shadow_models']}")
-            model, prob = self._train_shadow_models()
+        for i in range(1, self.config.num_shadow_models + 1):
+            LOGGER.info(f"training shadow model {i}/{self.config.num_shadow_models}")
+            model, prob = self._train_shadow_model()
             self._shadow_models.append(model)
             pr_z = pr_z + prob
         population_prob_shadow = pr_z / len(self._shadow_models)
@@ -71,15 +83,15 @@ class RmiaOfflineAttacker(AttackerInterface):
             population_prob_shadow + 1e-15
         )
 
-    @jaxtyped(typechecker=typechecked)
-    def _train_shadow_models(self):
+    @tensor_typechecked
+    def _train_shadow_model(self):
         # randomly select half of the shadow dataset to train a shadow model
         indices = torch.randperm(len(self._shadow_dataset), generator=self._generator)[
             : len(self._shadow_dataset) // 2
         ]
         data_loader = self._shadow_dataset.select(indices).make_loader(shuffle=True)
-        model = type(self._target_model)(self._target_model.config, None)
-        model.train(self.config["shadow_model_training_epochs"], data_loader, None)
+        model = self._target_model.make_shadow()
+        model.train(self.config.shadow_model_training_epochs, data_loader, None)
 
         # calculate probability of true class on population dataset using shadow model
         prob = list[FP[T, "b=_"]]()
@@ -88,7 +100,7 @@ class RmiaOfflineAttacker(AttackerInterface):
         prob = torch.cat(prob, 0)
         return model, prob
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     def _calc_query_prob_distribution(self, query: dict) -> FP[T, "b"]:
         # calculate probability of true class using shadow models
         pr_out_x = 0
@@ -96,11 +108,11 @@ class RmiaOfflineAttacker(AttackerInterface):
             prob = _get_prob(model, query)
             pr_out_x = pr_out_x + prob
         pr_out_x = pr_out_x / len(self._shadow_models)
-        scale_a = self.config["scale_a"]
+        scale_a = self.config.scale_a
         prob_target = 0.5 * ((1 + scale_a) * pr_out_x + (1 - scale_a))
         return prob_target
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     @override
     def score(self, query: dict) -> dict:
         query_prob_shadow = self._calc_query_prob_distribution(query)
@@ -108,16 +120,26 @@ class RmiaOfflineAttacker(AttackerInterface):
         lr_target: FP[T, "b"] = query_prob_target / (query_prob_shadow + 1e-15)
 
         ratios: FP[T, "b S"] = lr_target[:, None] / self._lr_population[None]
-        scores: FP[T, "b"] = (ratios > self.config["gamma"]).to(ratios).mean(-1)
+        scores: FP[T, "b"] = (ratios > self.config.gamma).to(ratios).mean(-1)
         return dict(scores=scores, ratios=ratios)
+
+
+class RmiaOnlineAttackerConfig(_AttackerConfigBase):
+    population_subset_size: int
+    num_shadow_models: int
+    shadow_model_training_epochs: int
+    scale_a: float
+    gamma: float
 
 
 @typechecked
 class RmiaOnlineAttacker(AttackerInterface):
-    @jaxtyped(typechecker=typechecked)
+    config: RmiaOnlineAttackerConfig
+
+    @tensor_typechecked
     def __init__(
         self,
-        config: dict,
+        config: RmiaOnlineAttackerConfig,
         target_model: ModelInterface,
         *,
         shadow_dataset: DatasetInterface,
@@ -126,11 +148,10 @@ class RmiaOnlineAttacker(AttackerInterface):
         super().__init__(config, target_model)
         self._shadow_dataset = shadow_dataset
 
-        self._generator = torch.Generator("cpu")
-        self._generator.manual_seed(self.config["seed"])
+        self._generator = torch.Generator("cpu").manual_seed(self.config.seed)
         indices = torch.randperm(len(self._shadow_dataset), generator=self._generator)
         self._population_data_loader = self._shadow_dataset.select(
-            indices[: self.config["population_subset_size"]]
+            indices[: self.config.population_subset_size]
         ).make_loader(shuffle=False)
 
         population_prob_target = list[FP[T, "batch=_"]]()
@@ -139,7 +160,7 @@ class RmiaOnlineAttacker(AttackerInterface):
             population_prob_target.append(prob)
         self._population_prob_target: FP[T, "S"] = torch.cat(population_prob_target, 0)
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     def _train_shadow_models(self, query: dict):
         # randomly select half of the shadow dataset to train a shadow model
         indices = torch.randperm(len(self._shadow_dataset), generator=self._generator)
@@ -166,15 +187,13 @@ class RmiaOnlineAttacker(AttackerInterface):
                     last_data[k] = torch.cat([v, query[k]], 0)
                 yield last_data
         # fmt:on
-        model = type(self._target_model)(self._target_model.config, None)
-        model.train(
-            self.config["shadow_model_training_epochs"], _HackDataInLoader(), None
-        )
+        model = self._target_model.make_shadow()
+        model.train(self.config.shadow_model_training_epochs, _HackDataInLoader(), None)
         prob_in: FP[T, "b"] = _get_prob(model, query)
 
         # Exclude the target example from the dataset
-        model = type(self._target_model)(self._target_model.config, None)
-        model.train(self.config["shadow_model_training_epochs"], data_out_loader, None)
+        model = self._target_model.make_shadow()
+        model.train(self.config.shadow_model_training_epochs, data_out_loader, None)
         prob_out: FP[T, "b"] = _get_prob(model, query)
 
         # calculate probability of true class on population dataset using shadow model
@@ -184,19 +203,19 @@ class RmiaOnlineAttacker(AttackerInterface):
         prob_population: FP[T, "b S"] = torch.cat(prob_population, 0)
         return prob_in, prob_out, prob_population
 
-    @jaxtyped(typechecker=typechecked)
+    @tensor_typechecked
     @override
     def score(self, query: dict) -> dict:
         prob_in, prob_out, population_prob_shadow = 0, 0, 0
-        for i in range(1, self.config["num_shadow_models"] + 1):
-            LOGGER.info(f"training shadow model {i}/{self.config['num_shadow_models']}")
+        for i in range(1, self.config.num_shadow_models + 1):
+            LOGGER.info(f"training shadow model {i}/{self.config.num_shadow_models}")
             p_in, p_out, p_population = self._train_shadow_models(query)
             prob_in = prob_in + p_in
             prob_out = prob_out + p_out
             population_prob_shadow = population_prob_shadow + p_population
 
         prob_in, prob_out, population_prob_shadow = (
-            x / self.config["num_shadow_models"]
+            x / self.config.num_shadow_models
             for x in (prob_in, prob_out, population_prob_shadow)
         )
 
@@ -208,5 +227,5 @@ class RmiaOnlineAttacker(AttackerInterface):
         )
 
         ratios: FP[T, "b S"] = lr_target[:, None] / lr_population
-        scores: FP[T, "b"] = (ratios > self.config["gamma"]).to(ratios).mean(-1)
+        scores: FP[T, "b"] = (ratios > self.config.gamma).to(ratios).mean(-1)
         return dict(scores=scores, ratios=ratios)
