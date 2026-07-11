@@ -1,0 +1,9 @@
+name: RmiaOffline
+config:
+  type: RmiaOfflineAttacker
+  seed: ${runtime.seed}
+  population_subset_size: 100
+  num_shadow_models: 4
+  shadow_model_training_epochs: ${train.shadow_epochs}
+  gamma: 0.5
+  scale_a: 0.3

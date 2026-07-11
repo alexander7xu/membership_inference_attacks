@@ -1,15 +1,14 @@
-from typing import Iterable
-
 import matplotlib.pyplot as plt
+from beartype.typing import Iterable
 from matplotlib.figure import Figure
-from sklearn.metrics import roc_curve, auc
+from sklearn.metrics import auc, roc_curve
 
 from src.utils.annotation import typechecked
 
 
 @typechecked
 def roc(references: Iterable[int], scores: Iterable[float]) -> tuple[Figure, float]:
-    tpr, fpr, _ = roc_curve(references, scores)
+    fpr, tpr, _ = roc_curve(references, scores)
     auc_score = auc(fpr, tpr)
 
     fig, ax = plt.subplots()

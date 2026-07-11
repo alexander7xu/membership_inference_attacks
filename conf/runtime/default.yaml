@@ -1,0 +1,4 @@
+seed: ???
+deterministic: false
+device: cuda
+num_workers: 8

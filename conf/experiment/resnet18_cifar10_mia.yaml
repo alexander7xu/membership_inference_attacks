@@ -1,0 +1,4 @@
+name: resnet18_cifar10_membership_attack
+purpose: "Evaluate membership inference attack scores for a ResNet-18 target trained on CIFAR-10."
+hypothesis: "Member examples should receive higher attack scores than held-out validation examples."
+next_action: "Compare LiRA and RMIA variants under the same seed and data split."

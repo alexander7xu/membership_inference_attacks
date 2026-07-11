@@ -1,0 +1,17 @@
+measurement_samples: 100
+available_shadow_samples: null
+member_positive_label: 1
+dataset_config:
+  type: TorchvisionDataset
+  seed: ${runtime.seed}
+  dataset_class: CIFAR10
+  dataloader_kwargs:
+    batch_size: 1024
+    num_workers: ${runtime.num_workers}
+    persistent_workers: true
+    pin_memory: true
+    shuffle: null
+  dataset_kwargs:
+    root: data/dataset
+    download: true
+    train: null

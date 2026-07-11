@@ -1,0 +1,6 @@
+name: LiraOnline
+config:
+  type: LiraOnlineAttacker
+  seed: ${runtime.seed}
+  num_shadow_models: 5
+  shadow_model_training_epochs: ${train.shadow_epochs}

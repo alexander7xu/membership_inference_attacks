@@ -1,0 +1,2 @@
+target_model_path: data/training/resnet18_cifar10_10epochs.pth
+force_retrain: false

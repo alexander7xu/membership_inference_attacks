@@ -4,7 +4,6 @@ import logging
 from src.model import ModelInterface
 from src.utils import ConfigBase
 
-
 LOGGER = logging.getLogger("attacker")
 LOGGER.setLevel(logging.INFO)
 

@@ -1,6 +1,5 @@
-from typing import Iterable
-
 import matplotlib.pyplot as plt
+from beartype.typing import Iterable
 from matplotlib.figure import Figure
 
 from src.utils.annotation import typechecked

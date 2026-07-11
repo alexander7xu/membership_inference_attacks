@@ -6,10 +6,11 @@
 }
 """
 
-from typing import override, Iterable
+from collections.abc import Iterable
 
 import torch
 import torchvision
+from typing_extensions import override
 
 from src.dataset.interface import DatasetInterface, _DatasetConfigBase
 
@@ -18,7 +19,6 @@ class TorchvisionDatasetConfig(_DatasetConfigBase):
     dataset_class: str
     dataset_kwargs: dict
     dataloader_kwargs: dict
-    pass
 
 
 class _WrapTorchvisionDataset:
@@ -28,10 +28,12 @@ class _WrapTorchvisionDataset:
         self._dataset = dataset_class(**dataset_kwargs)
         if indices is None:
             indices = range(len(self._dataset))
-        self._indices = list(indices)
-        self._transform = torchvision.transforms.Compose([
-            torchvision.transforms.ToTensor(),
-        ]) # fmt:skip
+        self._indices = [int(index) for index in indices]
+        self._transform = torchvision.transforms.Compose(
+            [
+                torchvision.transforms.ToTensor(),
+            ]
+        )
 
     def __len__(self) -> int:
         return len(self._indices)
@@ -40,13 +42,19 @@ class _WrapTorchvisionDataset:
         real_idx = self._indices[idx]
         img, target = self._dataset[real_idx]
         inputs = self._transform(img)
-        return dict(inputs=inputs, labels=target)
+        return {"inputs": inputs, "labels": target}
 
 
 class TorchvisionDataset(DatasetInterface):
     config: TorchvisionDatasetConfig
 
-    def __init__(self, config: dict, *, _indices: Iterable[int] | None = None, **_):
+    def __init__(
+        self,
+        config: TorchvisionDatasetConfig,
+        *,
+        _indices: Iterable[int] | None = None,
+        **_,
+    ):
         super().__init__(config)
         dataset_class = getattr(torchvision.datasets, self.config.dataset_class)
         self._dataset = _WrapTorchvisionDataset(
@@ -64,9 +72,10 @@ class TorchvisionDataset(DatasetInterface):
     @override
     def make_loader(self, **overwrite_config) -> torch.utils.data.DataLoader:
         generator = torch.Generator("cpu").manual_seed(self.config.seed)
-        config = self.config.dataloader_kwargs
-        for k, v in overwrite_config.items():
-            config[k] = v
+        config = dict(self.config.dataloader_kwargs)
+        config.update(overwrite_config)
+        if int(config.get("num_workers", 0)) == 0:
+            config.pop("persistent_workers", None)
 
         return torch.utils.data.DataLoader(
             self._dataset,

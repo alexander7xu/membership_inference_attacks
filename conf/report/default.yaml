@@ -1,0 +1,5 @@
+learning_curve_filename: learning_curve.png
+roc_filename: roc.png
+scores_filename: attack_scores.csv
+experiment_filename: experiment.md
+resolved_config_filename: resolved_config.yaml

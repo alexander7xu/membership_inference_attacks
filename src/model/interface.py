@@ -1,12 +1,11 @@
 import abc
 import logging
-from typing import Iterable
 
 import torch
+from beartype.typing import Iterable
 
 from src.utils import ConfigBase
 from src.utils.annotation import typechecked
-
 
 LOGGER = logging.getLogger("model")
 

@@ -1,0 +1,22 @@
+defaults:
+  - runtime: default
+  - experiment: resnet18_cifar10_mia
+  - data: cifar10
+  - model: resnet18
+  - optimizer: adam
+  - scheduler: none
+  - loss: cross_entropy
+  - precision: float32
+  - train: default
+  - eval: attack
+  - checkpoint: resnet18_cifar10
+  - wandb: offline
+  - report: default
+  - attack: lira_online
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${experiment.name}_${attack.name}

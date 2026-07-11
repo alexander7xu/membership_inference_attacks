@@ -1,0 +1,7 @@
+config:
+  type: TorchvisionModel
+  device: ${runtime.device}
+  dtype: ${precision.dtype}
+  model_version: resnet18
+  model_kwargs:
+    num_classes: 10

@@ -7,9 +7,8 @@
 }
 """
 
-from typing import override
-
 import torch
+from typing_extensions import override
 
 from src.attacker.interface import (
     LOGGER,
@@ -18,7 +17,7 @@ from src.attacker.interface import (
     _AttackerConfigBase,
 )
 from src.dataset import DatasetInterface
-from src.utils.annotation import T, FP, Int, typechecked, tensor_typechecked
+from src.utils.annotation import FP, Int, T, tensor_typechecked, typechecked
 
 
 @torch.no_grad
