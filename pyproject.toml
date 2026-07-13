@@ -3,10 +3,10 @@ name = "membership-inference-attacks"
 version = "0.1.0"
 description = "Reproducible membership inference attack experiments."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = "~=3.13.0"
 dependencies = [
-  "torch>=2.2",
-  "torchvision>=0.17",
+  "torch==2.13.0",
+  "torchvision==0.28.0",
   "hydra-core>=1.3",
   "omegaconf>=2.3",
   "wandb>=0.17",
@@ -16,7 +16,24 @@ dependencies = [
   "scikit-learn>=1.4",
   "PyYAML>=6.0",
   "typing-extensions>=4.9",
+  "transformers>=4.46",
+  "datasets>=3.0",
+  "accelerate>=0.34",
+  "peft>=0.13",
+  "safetensors>=0.4",
+  "sentencepiece>=0.2",
+  "tokenizers>=0.20",
+  "tqdm>=4.66",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
 
 [project.optional-dependencies]
 dev = [
@@ -31,7 +48,7 @@ addopts = "-ra"
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
@@ -43,3 +60,5 @@ indent-style = "space"
 
 [tool.ruff.lint.per-file-ignores]
 "cli/attack_resnet_cifar10.py" = ["E402"]
+"cli/squad_lora_rmia.py" = ["E402"]
+"cli/debug_squad_lora_gpu.py" = ["E402"]

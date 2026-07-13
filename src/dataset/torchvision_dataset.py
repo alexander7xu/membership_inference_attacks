@@ -7,10 +7,10 @@
 """
 
 from collections.abc import Iterable
+from typing import override
 
 import torch
 import torchvision
-from typing_extensions import override
 
 from src.dataset.interface import DatasetInterface, _DatasetConfigBase
 
