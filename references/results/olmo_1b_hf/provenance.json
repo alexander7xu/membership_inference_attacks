@@ -1,0 +1,78 @@
+{
+  "excluded_artifacts": [
+    "LoRA adapter weights",
+    "public and private JSONL data",
+    "shadow masks",
+    "online RMIA per-record scores",
+    "offline W&B binary runs",
+    "logs"
+  ],
+  "execution_phases": {
+    "downstream_evaluation_generation_shadows_attack": {
+      "base_commit": "3f8e7030098d0310c34efb1c74f3e7574da8ac4e",
+      "branch": "codex/squad-lora-rmia",
+      "environment_records": [
+        "eval/base/experiment.md",
+        "eval/target_lora/experiment.md",
+        "generated/experiment.md",
+        "shadows/shadow_00/experiment.md",
+        "shadows/shadow_01/experiment.md",
+        "shadows/shadow_02/experiment.md",
+        "shadows/shadow_03/experiment.md",
+        "shadows/shadow_04/experiment.md",
+        "attack/experiment.md"
+      ],
+      "worktree_dirty": true
+    },
+    "target_training": {
+      "base_commit": "6447cce3dcf07d2797e9a41355b966732611d4f0",
+      "branch": "master",
+      "environment_records": [
+        "target/seed_42/experiment.md"
+      ],
+      "worktree_dirty": true
+    }
+  },
+  "model": "allenai/OLMo-1B-hf",
+  "original_file_sha256": {
+    "attack/experiment.md": "5e991cde9cd72b85e5a66c421d9bb1bb63b70b7bf4bf078fc00ebf6cadeba634",
+    "attack/manifest.json": "28df2dfffbc23adaf62bdf04e1571c9809ad1a82e96beff9c6d2febc0986d1d6",
+    "attack/metrics.json": "df955c771511f72109167adc71f2cad15df9efe4834808e949394c1d77744d4f",
+    "candidates/manifest.json": "f469428f545a00b7a1744e0f5484fa6ffbca095968f2e1a54eb375a306a6df49",
+    "eval/base/experiment.md": "a7ee2ec92305f7d7e20b472004d3d876a4713355f261ed04e81934702fc1e00d",
+    "eval/base/metrics.json": "048904e6311e4c64de0ef6700bfa91b72c168c8577b28646258a07a6c6b44574",
+    "eval/base/resolved_config.yaml": "9117ab94135600b9bf610bcda34aa37507469c41b9c4d32b069c6fa6e97dcda7",
+    "eval/target_lora/experiment.md": "1c72ffa3ce8f6a19ea682a6d4f699a673abf65a0fab8d1a31b43048c7a4e3681",
+    "eval/target_lora/metrics.json": "2011c82dbf330ee35c2a7ca048cb8cb98cfd5758d3c9b798c5d00d635cd8ce03",
+    "eval/target_lora/resolved_config.yaml": "9117ab94135600b9bf610bcda34aa37507469c41b9c4d32b069c6fa6e97dcda7",
+    "generated/experiment.md": "a0c2f5df99baeafe7c06925359fcdbdf6acf82ff1a4cca4bcd38fc92502ee6f4",
+    "generated/manifest.json": "8da61335ec39116613efa0c05b570a9deb55300e567334178a59f3f179c8164b",
+    "generated/metrics.json": "b7f649c4444453a4795e608350d312a726ed965ea6405fd26267dfff62cc40ce",
+    "shadows/shadow_00/experiment.md": "5a3bc894d2cd622a905df9cc4dfa1fc7af922600fb23007d6a0ed9ef158c97d2",
+    "shadows/shadow_00/inclusion_summary.json": "72265fe546f812e5c7740dd71e11975fef18b5d73a898a917bdb2adeddaf7843",
+    "shadows/shadow_00/metrics.json": "7fb3c525b295d42486a02ef359271ea9046da9ed721c681d926e6236474a2e23",
+    "shadows/shadow_00/resolved_config.yaml": "9117ab94135600b9bf610bcda34aa37507469c41b9c4d32b069c6fa6e97dcda7",
+    "shadows/shadow_01/experiment.md": "aec696611b5e62d36dbf0a2d02e4579966304d8089e077f9cf8948c28e15c2d7",
+    "shadows/shadow_01/inclusion_summary.json": "232d2b698b751d78b31a8fbf15c7744eea0b3c910148f37a08fef61c5a268c29",
+    "shadows/shadow_01/metrics.json": "d75e6b893cb614f66dd8f539e8d47c5b9cb1fd88aad8f37f7cbf7385c624eecd",
+    "shadows/shadow_01/resolved_config.yaml": "9117ab94135600b9bf610bcda34aa37507469c41b9c4d32b069c6fa6e97dcda7",
+    "shadows/shadow_02/experiment.md": "45e7f10643edbb2e84ec56a446ae21b8148d0bf559961e5ed04ce39640597f90",
+    "shadows/shadow_02/inclusion_summary.json": "26fe85d20a52a1fcb72db301e9bd353f5afa2a22fa7b226109ca12c87c797952",
+    "shadows/shadow_02/metrics.json": "c212d6c666d9163535c55ca645dcf168a8b26e4e9533fce50d70485b4c9fe81c",
+    "shadows/shadow_02/resolved_config.yaml": "9117ab94135600b9bf610bcda34aa37507469c41b9c4d32b069c6fa6e97dcda7",
+    "shadows/shadow_03/experiment.md": "166788917555dc1e87148946db098b68069611e255f8f64ee81601233f722894",
+    "shadows/shadow_03/inclusion_summary.json": "cd105194c5b5b71fe6c71b14734c9f3370cb8630d2cc6cbd69d411b103053e5c",
+    "shadows/shadow_03/metrics.json": "17782ac747dce27995057a17843710b68a5253ed3d6ac6aec1ebcf7e53c90f21",
+    "shadows/shadow_03/resolved_config.yaml": "9117ab94135600b9bf610bcda34aa37507469c41b9c4d32b069c6fa6e97dcda7",
+    "shadows/shadow_04/experiment.md": "cdfeb6c436a5555deda76cd1087078fa1eefb1764eb661df110c2cbd8ee82c48",
+    "shadows/shadow_04/inclusion_summary.json": "155c910a2f749c868c59264f3f398a290835e9d5df86e9cd017f778344557b43",
+    "shadows/shadow_04/metrics.json": "c7ec760a2d0b402a273a74a1e40bc93c47f86665902bfad00e64dddc68daf19a",
+    "shadows/shadow_04/resolved_config.yaml": "9117ab94135600b9bf610bcda34aa37507469c41b9c4d32b069c6fa6e97dcda7",
+    "target/seed_42/experiment.md": "4f6d2cf2c595b763911986ef29c563f251cd3ebc079abf7bcafd650377b56faf",
+    "target/seed_42/metrics.json": "b329377d47a33f3991c7be6d295dde851cd31a0f500dbb69127f85c14d0b93a3",
+    "target/seed_42/resolved_config.yaml": "9117ab94135600b9bf610bcda34aa37507469c41b9c4d32b069c6fa6e97dcda7"
+  },
+  "plan_commit": "b31db23342202ab001f9fe53bbbb16c0440dcf69",
+  "source_snapshot_commit": "c0c177d27cbb48f4fbb9aa3e9c0fb0b98782a75d",
+  "source_snapshot_is_retrospective": true
+}
