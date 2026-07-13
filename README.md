@@ -2,7 +2,8 @@
 
 This repository contains reproducible experiment code for CIFAR-10
 membership inference attacks using torchvision models and LiRA/RMIA-style
-attackers.
+attackers. It also includes a formal SQuAD LoRA fine-tuning and online RMIA
+workflow for causal language models.
 
 ## Environment
 
@@ -15,7 +16,7 @@ uv sync --extra dev
 `requirements.txt` is intentionally not used as a formal environment source.
 Add dependencies in `pyproject.toml` and refresh `uv.lock`.
 
-## Smoke Run
+## CIFAR-10 Smoke Run
 
 Launch experiments from the project root. Pass the seed explicitly so the
 run record captures the exact source of randomness:
@@ -32,8 +33,27 @@ attack=rmia_online
 attack=rmia_offline
 ```
 
-Hydra keeps the process working directory at the project root and writes
-run artifacts under `outputs/`.
+## SQuAD LoRA And Online RMIA
+
+The LLM workflow is documented in
+`references/squad_lora_rmia_experiment_plan.md`.
+
+Run a tiny end-to-end smoke pass first:
+
+```bash
+bash scripts/run_squad_lora_rmia_smoke.sh
+```
+
+Launch the formal Pythia-410M and OLMo-1B-hf runs:
+
+```bash
+bash scripts/run_squad_lora_rmia_formal.sh
+```
+
+The target and shadow models use the same Hydra training entry point. Formal
+outputs are written under `outputs/squad_lora_rmia/`; generated data, LoRA
+adapters, private labels, masks, metrics, manifests, and `experiment.md` files
+are ignored by Git and tracked through run records.
 
 ## Verification
 
@@ -49,8 +69,8 @@ Each formal run writes:
 
 - `resolved_config.yaml`
 - `experiment.md`
-- score/reference CSV files
-- ROC and learning-curve figures when generated
+- metrics and manifest JSON files
+- score/reference files and figures when generated
 
 W&B defaults to offline mode. Use `wandb sync` explicitly after inspecting a
 run if online synchronization is desired.

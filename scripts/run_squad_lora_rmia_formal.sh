@@ -11,7 +11,7 @@ INFERENCE_BATCH_SIZE="${INFERENCE_BATCH_SIZE:-96}"
 GENERATION_BATCH_SIZE="${GENERATION_BATCH_SIZE:-96}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
 
-for model in pythia_410m; do
+for model in pythia_410m olmo_1b_hf; do
   uv run python ./cli/squad_lora_rmia.py \
     runtime.seed=42 \
     workflow.stage=formal \
