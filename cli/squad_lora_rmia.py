@@ -1,5 +1,6 @@
 import logging
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -18,10 +19,14 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 logging.basicConfig(level=logging.INFO)
 
 
+def reproducible_command(argv: list[str]) -> str:
+    return shlex.join(["uv", "run", "python", "./cli/squad_lora_rmia.py", *argv[1:]])
+
+
 @hydra.main(version_base=None, config_path="../conf", config_name="squad_lora_rmia")
 def main(cfg: DictConfig) -> None:
     OmegaConf.resolve(cfg)
-    run_stage(cfg, command=" ".join([sys.executable, *sys.argv]))
+    run_stage(cfg, command=reproducible_command(sys.argv))
 
 
 if __name__ == "__main__":

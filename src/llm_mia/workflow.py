@@ -88,6 +88,10 @@ def run_stage(cfg: DictConfig, *, command: str) -> None:
             generate_target_candidates(
                 cfg, project_root=project_root, command=command, smoke=False
             )
+        elif stage == "generate_base":
+            generate_base_candidates(
+                cfg, project_root=project_root, command=command, smoke=False
+            )
         elif stage == "build_candidates":
             build_candidate_set(cfg, project_root=project_root, smoke=False)
         elif stage == "train_shadows":
@@ -765,7 +769,76 @@ def generate_target_candidates(
     target_adapter = train_target(
         cfg, project_root=project_root, command=command, smoke=smoke
     )
-    run_dir = model_root(cfg, project_root, smoke=smoke) / "generated"
+    _generate_candidates(
+        cfg,
+        project_root=project_root,
+        command=command,
+        smoke=smoke,
+        adapter_path=target_adapter,
+        run_dir=model_root(cfg, project_root, smoke=smoke) / "generated",
+        model_run_id=str(target_adapter),
+        wandb_stage="generated",
+        purpose=(
+            "Generate reusable target-model candidate completions for "
+            f"{cfg.model.display_name}."
+        ),
+        hypothesis=(
+            "Generated records will mostly be non-members unless prompt and "
+            "generated completion exactly reconstruct a target training record."
+        ),
+        conclusion=(
+            "Generated artifacts and private provenance labels were saved for reuse."
+        ),
+        next_action="Build public attack candidates and shadow inclusion masks.",
+    )
+
+
+def generate_base_candidates(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    command: str,
+    smoke: bool,
+) -> None:
+    prepare_data(cfg, project_root)
+    model_id = f"{cfg.model.name_or_path}@{cfg.model.revision}"
+    _generate_candidates(
+        cfg,
+        project_root=project_root,
+        command=command,
+        smoke=smoke,
+        adapter_path=None,
+        run_dir=model_root(cfg, project_root, smoke=smoke) / "generated" / "base",
+        model_run_id=model_id,
+        wandb_stage="generated_base",
+        purpose=(
+            f"Generate reusable base-model completions for {cfg.model.display_name} "
+            "from the SQuAD train, SQuAD validation, and TriviaQA validation sources."
+        ),
+        hypothesis=(
+            "Base-model generation on the same deterministic source subsets provides "
+            "a reproducible pre-LoRA reference for generated-data comparisons."
+        ),
+        conclusion="Base-model generations and source provenance were saved for reuse.",
+        next_action="Compare base and target-LoRA generation metrics and distributions.",
+    )
+
+
+def _generate_candidates(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    command: str,
+    smoke: bool,
+    adapter_path: Path | None,
+    run_dir: Path,
+    model_run_id: str,
+    wandb_stage: str,
+    purpose: str,
+    hypothesis: str,
+    conclusion: str,
+    next_action: str,
+) -> None:
     manifest_path = run_dir / "manifest.json"
     if manifest_path.exists() and not bool(cfg.workflow.force):
         LOGGER.info("Reusing generated candidate artifacts: %s", manifest_path)
@@ -789,7 +862,10 @@ def generate_target_candidates(
         limit=limit,
         namespace="gen_from_trivia_validation",
     )
-    model, tokenizer = load_model_for_inference(cfg, adapter_path=str(target_adapter))
+    model, tokenizer = load_model_for_inference(
+        cfg,
+        adapter_path=str(adapter_path) if adapter_path is not None else None,
+    )
     groups = {
         "gen_from_squad_train": materialize_records(
             target_train,
@@ -855,7 +931,7 @@ def generate_target_candidates(
             public_rows.append(
                 {
                     **public_candidate(generated, cid),
-                    "model_run_id": str(target_adapter),
+                    "model_run_id": model_run_id,
                     "generation_config": {
                         "do_sample": bool(cfg.generation.do_sample),
                         "temperature": float(cfg.generation.temperature),
@@ -921,6 +997,11 @@ def generate_target_candidates(
     write_jsonl(public_path, public_rows)
     write_jsonl(private_path, private_rows)
     write_json(metrics_path, metrics)
+    resolved_config_path = run_dir / str(cfg.report.resolved_config_filename)
+    write_yaml(
+        resolved_config_path,
+        OmegaConf.to_container(cfg, resolve=True),
+    )
     manifest = artifact_manifest(
         cfg,
         project_root,
@@ -928,27 +1009,37 @@ def generate_target_candidates(
             "public_generated": public_path,
             "private_generated_labels": private_path,
             "metrics": metrics_path,
+            "resolved_config": resolved_config_path,
         },
         row_counts={
             "public_generated": len(public_rows),
             "private_generated_labels": len(private_rows),
         },
     )
+    manifest["files"] = {
+        name: str(Path(path).relative_to(project_root))
+        for name, path in manifest["files"].items()
+    }
+    manifest["generation_source"] = {
+        "model": model_run_id,
+        "adapter": None if adapter_path is None else str(adapter_path),
+    }
     write_json(manifest_path, manifest)
     tracking_artifacts = _log_wandb_stage(
-        stage="generated",
+        stage=wandb_stage,
         metrics=metrics,
         paths={
             "public_generated": public_path,
             "private_generated_labels": private_path,
             "metrics": metrics_path,
             "manifest": manifest_path,
+            "resolved_config": resolved_config_path,
         },
     )
     write_experiment_markdown(
         run_dir / str(cfg.report.experiment_filename),
-        purpose=f"Generate reusable target-model candidate completions for {cfg.model.display_name}.",
-        hypothesis="Generated records will mostly be non-members unless prompt and generated completion exactly reconstruct a target training record.",
+        purpose=purpose,
+        hypothesis=hypothesis,
         command=command,
         overrides=[],
         config_fingerprint_value=config_fingerprint(
@@ -958,12 +1049,14 @@ def generate_target_candidates(
         environment=extended_environment(project_root),
         artifacts={
             **{name: str(path) for name, path in manifest["files"].items()},
+            "model": model_run_id,
+            "adapter": str(adapter_path or "base-model"),
             **tracking_artifacts,
         },
         metrics=metrics,
-        conclusion="Generated artifacts and private provenance labels were saved for reuse.",
+        conclusion=conclusion,
         achieved_purpose=True,
-        next_action="Build public attack candidates and shadow inclusion masks.",
+        next_action=next_action,
         wandb_run_id=_active_wandb_run_id(),
     )
     del model
