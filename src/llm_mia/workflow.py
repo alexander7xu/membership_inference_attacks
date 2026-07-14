@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import logging
 import math
 from contextvars import ContextVar
@@ -60,6 +61,12 @@ from src.llm_mia.hf import (
     score_records,
 )
 from src.llm_mia.metrics import exact_match, mean, perplexity, token_f1
+from src.llm_mia.plotting import (
+    CANDIDATE_GROUPS,
+    plot_group_feature_ecdf,
+    sample_group_candidates,
+    summarize_group_features,
+)
 
 LOGGER = logging.getLogger(__name__)
 _ACTIVE_WANDB_RUN: ContextVar[Any | None] = ContextVar("active_wandb_run", default=None)
@@ -98,6 +105,10 @@ def run_stage(cfg: DictConfig, *, command: str) -> None:
             train_shadows(cfg, project_root=project_root, command=command, smoke=False)
         elif stage == "attack":
             run_attack(cfg, project_root=project_root, command=command, smoke=False)
+        elif stage == "plot_rmia_feature":
+            plot_rmia_feature_distribution(
+                cfg, project_root=project_root, command=command
+            )
         else:
             raise ValueError(f"Unknown workflow.stage: {stage}")
     finally:
@@ -1375,6 +1386,314 @@ def run_attack(
         conclusion="Scores used text and shadow masks only; evaluator labels were applied after scoring.",
         achieved_purpose=True,
         next_action="Compare model families and true membership-conditioned distributions.",
+        wandb_run_id=_active_wandb_run_id(),
+    )
+
+
+def _analysis_candidate_rows(
+    root: Path,
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, Path],
+]:
+    source_files = {
+        "lora_and_gold_public": root / "candidates" / "public_candidates.jsonl",
+        "lora_and_gold_private": root / "candidates" / "private_labels.jsonl",
+        "base_public": root / "generated" / "base" / "public_generated.jsonl",
+        "base_private": (
+            root / "generated" / "base" / "private_generated_labels.jsonl"
+        ),
+    }
+    for source_path in source_files.values():
+        if not source_path.is_file():
+            raise FileNotFoundError(
+                f"Required formal artifact is missing: {source_path}"
+            )
+
+    source_specs = (
+        (
+            source_files["lora_and_gold_public"],
+            source_files["lora_and_gold_private"],
+            {
+                "gold_squad_target_train": "gold_squad_target_train",
+                "gold_squad_validation": "gold_squad_validation",
+                "gold_trivia_validation": "gold_trivia_validation",
+                "gen_from_squad_train": "lora_gen_from_squad_train",
+                "gen_from_squad_validation": "lora_gen_from_squad_validation",
+                "gen_from_trivia_validation": "lora_gen_from_trivia_validation",
+            },
+        ),
+        (
+            source_files["base_public"],
+            source_files["base_private"],
+            {
+                "gen_from_squad_train": "base_gen_from_squad_train",
+                "gen_from_squad_validation": "base_gen_from_squad_validation",
+                "gen_from_trivia_validation": "base_gen_from_trivia_validation",
+            },
+        ),
+    )
+
+    public_rows: list[dict[str, object]] = []
+    private_rows: list[dict[str, object]] = []
+    seen_content_by_id: dict[str, str] = {}
+    for public_path, private_path, group_mapping in source_specs:
+        public_by_id = {
+            str(row["candidate_id"]): row for row in read_jsonl(public_path)
+        }
+        source_private_rows = read_jsonl(private_path)
+        if set(public_by_id) != {
+            str(row["candidate_id"]) for row in source_private_rows
+        }:
+            raise ValueError(
+                f"Public and private candidate IDs differ for {public_path}."
+            )
+        for private_row in source_private_rows:
+            source_group = str(private_row["private_group"])
+            if source_group not in group_mapping:
+                continue
+            public_row = public_by_id[str(private_row["candidate_id"])]
+            group = group_mapping[source_group]
+            content_sha256 = str(public_row["content_sha256"])
+            analysis_id = f"analysis_{group}_{content_sha256[:20]}"
+            previous_content = seen_content_by_id.get(analysis_id)
+            if previous_content is not None:
+                if previous_content != content_sha256:
+                    raise ValueError(f"Analysis candidate ID collision: {analysis_id}")
+                continue
+            seen_content_by_id[analysis_id] = content_sha256
+            public_rows.append({**public_row, "candidate_id": analysis_id})
+            private_rows.append(
+                {
+                    "candidate_id": analysis_id,
+                    "private_group": group,
+                }
+            )
+    return public_rows, private_rows, source_files
+
+
+def plot_rmia_feature_distribution(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    command: str,
+) -> None:
+    feature = str(cfg.analysis.feature)
+    if feature != "relative_log_likelihood":
+        raise ValueError(
+            "The formal RMIA feature plot requires relative_log_likelihood."
+        )
+
+    root = model_root(cfg, project_root, smoke=False)
+    public_rows, private_rows, source_files = _analysis_candidate_rows(root)
+    sample_size = int(cfg.analysis.sample_size_per_group)
+    sampling_seed = int(cfg.analysis.sampling_seed)
+    sampled_public, sampled_private = sample_group_candidates(
+        public_rows,
+        private_rows,
+        sample_size=sample_size,
+        seed=sampling_seed,
+    )
+    candidates = [record_from_public_candidate(row) for row in sampled_public]
+
+    target_adapter = root / "target" / f"seed_{int(cfg.runtime.seed)}" / "adapter"
+    shadow_adapters = [
+        root / "shadows" / f"shadow_{index:02d}" / "adapter"
+        for index in range(shadow_count(cfg, smoke=False))
+    ]
+    output_dir = root / "analysis" / feature
+    figure_path = output_dir / "relative_log_likelihood_ecdf.png"
+    sampled_path = output_dir / "sampled_candidates.jsonl"
+    manifest_path = output_dir / "manifest.json"
+    resolved_config_path = output_dir / str(cfg.report.resolved_config_filename)
+    experiment_path = output_dir / str(cfg.report.experiment_filename)
+    feature_definition = (
+        "target_mean_logprob - logmeanexp(mean_logprob from every saved shadow adapter)"
+    )
+
+    sampled_rows: list[dict[str, object]] | None = None
+    if (
+        sampled_path.is_file()
+        and manifest_path.is_file()
+        and not bool(cfg.workflow.force)
+    ):
+        prior_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected_sample_sha = prior_manifest.get("artifact_sha256", {}).get(
+            "sampled_candidates"
+        )
+        reusable = (
+            prior_manifest.get("feature") == feature
+            and prior_manifest.get("feature_definition") == feature_definition
+            and prior_manifest.get("group_order") == list(CANDIDATE_GROUPS)
+            and prior_manifest.get("sample_size_per_group") == sample_size
+            and prior_manifest.get("reference_shadow_count") == len(shadow_adapters)
+            and prior_manifest.get("row_counts", {}).get("total")
+            == sample_size * len(CANDIDATE_GROUPS)
+            and expected_sample_sha == file_sha256(sampled_path)
+        )
+        if reusable:
+            sampled_rows = read_jsonl(sampled_path)
+            LOGGER.info("Reusing formal RMIA feature scores: %s", sampled_path)
+
+    if sampled_rows is None:
+        target_scores = score_with_adapter(
+            cfg,
+            candidates,
+            adapter_path=target_adapter,
+            batch_size=int(cfg.attack.batch_size),
+        )
+        shadow_scores = [
+            score_with_adapter(
+                cfg,
+                candidates,
+                adapter_path=adapter,
+                batch_size=int(cfg.attack.batch_size),
+            )
+            for adapter in shadow_adapters
+        ]
+        if len(target_scores) != len(candidates) or any(
+            len(scores) != len(candidates) for scores in shadow_scores
+        ):
+            raise ValueError(
+                "RMIA feature score count does not match sampled candidates."
+            )
+
+        sampled_rows = []
+        for row_index, private_row in enumerate(sampled_private):
+            per_shadow = [scores[row_index] for scores in shadow_scores]
+            relative = population_relative_loglikelihood(
+                target_scores[row_index], per_shadow
+            )
+            sampled_rows.append(
+                {
+                    "candidate_id": private_row["candidate_id"],
+                    "private_group": private_row["private_group"],
+                    "sample_rank": private_row["sample_rank"],
+                    "target_mean_logprob": target_scores[row_index],
+                    "shadow_reference_mean_logprob": (
+                        target_scores[row_index] - relative
+                    ),
+                    "relative_log_likelihood": relative,
+                    "num_reference_shadows": len(per_shadow),
+                }
+            )
+
+    expected_rows = sample_size * len(CANDIDATE_GROUPS)
+    if len(sampled_rows) != expected_rows or any(
+        sum(row["private_group"] == group for row in sampled_rows) != sample_size
+        for group in CANDIDATE_GROUPS
+    ):
+        raise ValueError("Reusable RMIA feature scores have invalid group counts.")
+    if any(
+        int(row.get("num_reference_shadows", 0)) != len(shadow_adapters)
+        or not math.isfinite(float(row[feature]))
+        for row in sampled_rows
+    ):
+        raise ValueError("Reusable RMIA feature scores contain invalid values.")
+    summaries = summarize_group_features(sampled_rows, feature=feature)
+    write_jsonl(sampled_path, sampled_rows)
+    plot_group_feature_ecdf(
+        sampled_rows,
+        feature=feature,
+        model_display_name=str(cfg.model.display_name),
+        output_path=figure_path,
+        dpi=int(cfg.analysis.figure_dpi),
+    )
+    resolved_config = OmegaConf.to_container(cfg, resolve=True)
+    if not isinstance(resolved_config, dict):
+        raise TypeError("Resolved Hydra config must be a mapping.")
+    write_yaml(resolved_config_path, resolved_config)
+    config_sha256 = config_fingerprint(resolved_config)
+
+    artifacts = {
+        "figure": figure_path,
+        "sampled_candidates": sampled_path,
+        "resolved_config": resolved_config_path,
+    }
+    implementation_files = {
+        "plotting": project_root / "src" / "llm_mia" / "plotting.py",
+        "workflow": Path(__file__).resolve(),
+    }
+    manifest = {
+        "source_state": collect_git_state(project_root),
+        "implementation_files": {
+            name: {"path": str(path), "sha256": file_sha256(path)}
+            for name, path in implementation_files.items()
+        },
+        "config_sha256": config_sha256,
+        "seed": int(cfg.runtime.seed),
+        "sampling_seed": sampling_seed,
+        "sampling_algorithm": (
+            "ascending_sha256(seed:rmia-feature:group:candidate_id)"
+        ),
+        "sampling_without_replacement": True,
+        "sampling_before_model_scoring": True,
+        "feature": feature,
+        "feature_definition": feature_definition,
+        "model": str(cfg.model.name_or_path),
+        "target_adapter": str(target_adapter),
+        "shadow_adapters": [str(path) for path in shadow_adapters],
+        "reference_shadow_count": len(shadow_adapters),
+        "group_order": list(CANDIDATE_GROUPS),
+        "sample_size_per_group": sample_size,
+        "row_counts": {
+            **{group: sample_size for group in CANDIDATE_GROUPS},
+            "total": len(sampled_rows),
+        },
+        "source_files": {
+            name: {"path": str(path), "sha256": file_sha256(path)}
+            for name, path in source_files.items()
+        },
+        "artifacts": {name: str(path) for name, path in artifacts.items()},
+        "artifact_sha256": {
+            name: file_sha256(path) for name, path in artifacts.items()
+        },
+        "group_summaries": summaries,
+    }
+    write_json(manifest_path, manifest)
+
+    metrics = {
+        f"{group}_{name}": value
+        for group, summary in summaries.items()
+        for name, value in summary.items()
+        if name in {"count", "mean", "median"}
+    }
+    tracking_artifacts = _log_wandb_stage(
+        stage="rmia_feature_plot",
+        metrics=metrics,
+        paths={**artifacts, "manifest": manifest_path},
+    )
+    write_experiment_markdown(
+        experiment_path,
+        purpose=(
+            f"Compare nine candidate-group {feature} distributions for "
+            f"{cfg.model.display_name}."
+        ),
+        hypothesis=(
+            "Data source and text origin change the target-versus-shadow "
+            "relative log-likelihood distribution."
+        ),
+        command=command,
+        overrides=[],
+        config_fingerprint_value=config_sha256,
+        git_state=collect_git_state(project_root),
+        environment=extended_environment(project_root),
+        artifacts={
+            **{name: str(path) for name, path in artifacts.items()},
+            "manifest": str(manifest_path),
+            **tracking_artifacts,
+        },
+        metrics=metrics,
+        conclusion=(
+            "The figure is descriptive: color encodes the three data sources, "
+            "line style encodes gold/base-generated/LoRA-generated text, and "
+            "every curve uses an equal-size deterministic sample."
+        ),
+        achieved_purpose=True,
+        next_action=(
+            "Interpret group separation alongside token length and reference scores."
+        ),
         wandb_run_id=_active_wandb_run_id(),
     )
 

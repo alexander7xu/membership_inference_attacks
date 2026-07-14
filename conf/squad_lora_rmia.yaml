@@ -112,6 +112,12 @@ attack:
   bootstrap_samples: 2000
   fpr_thresholds: [0.01, 0.05]
 
+analysis:
+  feature: relative_log_likelihood
+  sample_size_per_group: 512
+  sampling_seed: ${runtime.seed}
+  figure_dpi: 240
+
 wandb:
   enabled: true
   mode: offline
