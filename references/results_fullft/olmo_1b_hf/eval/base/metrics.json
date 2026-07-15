@@ -1,0 +1,16 @@
+{
+  "squad_validation/completion_loss": 1.262316715221767,
+  "squad_validation/completion_perplexity": 3.5335983530657047,
+  "squad_validation/completion_tokens": 43806.0,
+  "squad_validation/examples": 10570.0,
+  "squad_validation/generation_exact_match": 0.0,
+  "squad_validation/generation_examples": 10570.0,
+  "squad_validation/generation_f1": 0.0075952025250757,
+  "trivia_validation/completion_loss": 1.8690898008391328,
+  "trivia_validation/completion_perplexity": 6.482393444188543,
+  "trivia_validation/completion_tokens": 57515.0,
+  "trivia_validation/examples": 17944.0,
+  "trivia_validation/generation_exact_match": 0.0,
+  "trivia_validation/generation_examples": 17944.0,
+  "trivia_validation/generation_f1": 0.006477351724183613
+}

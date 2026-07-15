@@ -1,0 +1,32 @@
+{
+  "config_sha256": "8ed3376a0bbffe7e5fe71ca5df329d796b279f15a042059d7c732eb038855030",
+  "file_sha256": {
+    "metrics": "aa20bd72e5f050e0d3dc9fcb99b7ce0ecc5858e86537c9172101bc0dac0053b3",
+    "private_generated_labels": "1fa250e1187299f575eaa8c917cd27965a2dad544d9224d67f9e22a7c6536887",
+    "public_generated": "40c2c5c958026c3132442f2fd5005378fe3d0a95ccc463b47164279442a3e951",
+    "resolved_config": "8ed3376a0bbffe7e5fe71ca5df329d796b279f15a042059d7c732eb038855030"
+  },
+  "files": {
+    "metrics": "outputs/squad_fullft_rmia/formal/pythia_410m/generated/metrics.json",
+    "private_generated_labels": "outputs/squad_fullft_rmia/formal/pythia_410m/generated/private_generated_labels.jsonl",
+    "public_generated": "outputs/squad_fullft_rmia/formal/pythia_410m/generated/public_generated.jsonl",
+    "resolved_config": "outputs/squad_fullft_rmia/formal/pythia_410m/generated/resolved_config.yaml"
+  },
+  "generation_source": {
+    "checkpoint": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/target/seed_42/model",
+    "model": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/target/seed_42/model"
+  },
+  "model": "EleutherAI/pythia-410m",
+  "row_counts": {
+    "private_generated_labels": 3072,
+    "public_generated": 3072
+  },
+  "seed": 42,
+  "source_commit": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "c3d3cd79a4b09aa12187ec462e1776033647b506",
+    "short_commit": "c3d3cd7",
+    "status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh"
+  },
+  "tokenizer": "EleutherAI/pythia-410m"
+}

@@ -1,0 +1,118 @@
+analysis:
+  feature: relative_log_likelihood
+  figure_dpi: 240
+  sample_size_per_group: 512
+  sampling_seed: 42
+attack:
+  batch_size: 96
+  bootstrap_samples: 2000
+  fpr_thresholds:
+  - 0.01
+  - 0.05
+  gamma: 0.5
+  loss_chunk_tokens: 64
+checkpoint:
+  active_checkpoint_model_equivalents: 3.0
+  resume_from_checkpoint: auto
+  save_steps: 250
+  save_strategy: steps
+  save_total_limit: 1
+  storage_margin: 0.3
+data:
+  auxiliary_pool_size: 43800
+  candidate_limit: 1024
+  eval_limit: null
+  smoke_candidate_limit: 4
+  smoke_eval_limit: 4
+  squad_config: plain_text
+  squad_dataset: rajpurkar/squad
+  squad_revision: 7b6d24c440a36b6815f21b70d25016731768db1f
+  squad_validation_candidate_size: 1024
+  squad_validation_population_size: 1024
+  target_train_size: 43799
+  trivia_config: rc
+  trivia_dataset: mandarjoshi/trivia_qa
+  trivia_revision: 0f7faf33a3908546c6fd5b73a660e0f8ff173c2f
+  trivia_validation_candidate_size: 1024
+eval:
+  batch_size: 96
+  generation_batch_size: 96
+  loss_chunk_tokens: 64
+experiment:
+  hypothesis: Target-trained SQuAD records exhibit different target/reference score
+    distributions than IID, OOD, and generated non-members.
+  purpose: Measure text-only membership-conditioned score distributions after full-parameter
+    SQuAD fine-tuning.
+finetuning:
+  _target_: src.llm_mia.finetuning.FullFineTuningStrategy
+  gradient_checkpointing: true
+generation:
+  batch_size: 96
+  do_sample: false
+  max_new_tokens: 64
+  temperature: 0.0
+loss:
+  name: completion_cross_entropy
+model:
+  display_name: Pythia-410M
+  key: pythia_410m
+  name_or_path: EleutherAI/pythia-410m
+  revision: 9879c9b5f8bea9051dcb0e68dff21493d67e9d4f
+optimizer:
+  name: adamw_torch
+  weight_decay: 0.0
+paths:
+  data_dir: data/squad_lora_rmia
+  output_root: outputs/squad_fullft_rmia
+precision:
+  bf16: true
+report:
+  experiment_filename: experiment.md
+  resolved_config_filename: resolved_config.yaml
+reuse:
+  base_generation_root: outputs/squad_lora_rmia/formal
+  enabled: true
+  split_root: data/squad_lora_rmia
+runtime:
+  deterministic: false
+  seed: 42
+scheduler:
+  name: linear
+  warmup_ratio: 0.03
+shadow:
+  count: 5
+  inclusion_probability: 0.5
+  seed_offset: 1000
+  smoke_count: 1
+  train_size: 43799
+tokenizer:
+  max_length: 1024
+  preprocessing_workers: 8
+  trust_remote_code: false
+train:
+  dataloader_num_workers: 4
+  dataloader_persistent_workers: true
+  dataloader_pin_memory: true
+  epochs: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 2.0e-05
+  logging_steps: 10
+  max_steps: null
+  per_device_eval_batch_size: 16
+  per_device_train_batch_size: 16
+  smoke_max_steps: 20
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+wandb:
+  enabled: true
+  entity: null
+  mode: offline
+  project: membership-inference-attacks
+  tags:
+  - squad
+  - full-finetuning
+  - text-only-membership-analysis
+workflow:
+  force: false
+  profile: formal
+  stage: generate_base

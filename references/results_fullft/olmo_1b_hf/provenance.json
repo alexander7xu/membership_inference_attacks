@@ -1,0 +1,388 @@
+{
+  "excluded_artifacts": [
+    "full-model weights and temporary checkpoints",
+    "generated and candidate JSONL/CSV records",
+    "attack score rows",
+    "local W&B directories",
+    "datasets and caches"
+  ],
+  "experiment": "SQuAD full fine-tuning and online RMIA",
+  "files": {
+    "analysis/relative_log_likelihood/experiment.md": {
+      "sha256": "fe584280d22f16acc11b10812a1ab8801ea3d04ec2851d9b93852570a5e2e0c1",
+      "size_bytes": 4224,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/analysis/relative_log_likelihood/experiment.md"
+    },
+    "analysis/relative_log_likelihood/manifest.json": {
+      "sha256": "d0df8041e2c7d4db378898267e8d1a81f48a5534e85ef42f958b8ded1d9544c6",
+      "size_bytes": 8264,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/analysis/relative_log_likelihood/manifest.json"
+    },
+    "analysis/relative_log_likelihood/relative_log_likelihood_ecdf.png": {
+      "sha256": "5e128f50136456d0c9ca2cddc675e359552ec31ec62f72e2a61164eb0bb3cd48",
+      "size_bytes": 216380,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/analysis/relative_log_likelihood/relative_log_likelihood_ecdf.png"
+    },
+    "analysis/relative_log_likelihood/resolved_config.yaml": {
+      "sha256": "9a9da4269aa1b8113917eef4451e90c36a3c7be2ed19ece6eb56c6a177ecb8cd",
+      "size_bytes": 2855,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/analysis/relative_log_likelihood/resolved_config.yaml"
+    },
+    "attack/experiment.md": {
+      "sha256": "27a86f4f8b558c177e2630096579c2294ff6b9b60aa7af70de7eba44067c4843",
+      "size_bytes": 6614,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/attack/experiment.md"
+    },
+    "attack/manifest.json": {
+      "sha256": "a3dc1bfd30dea93f8a6eebf1a3ef304dcb3097ea400e4b4e0834e2894a5a2a3f",
+      "size_bytes": 1096,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/attack/manifest.json"
+    },
+    "attack/metrics.json": {
+      "sha256": "7651927bc3a69126afb8f32a9db5a1f5915ba7841bf9a1c275edf898d21c2487",
+      "size_bytes": 4016,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/attack/metrics.json"
+    },
+    "candidates/manifest.json": {
+      "sha256": "40cf8847f4d6371deddda4e441274ddf60112b79842c5868b16f2ba8ba4139c5",
+      "size_bytes": 2019,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/candidates/manifest.json"
+    },
+    "eval/base/experiment.md": {
+      "sha256": "ba4569c4f84b51211420a8d678588efec123180ef3e956f53f4aae7457276552",
+      "size_bytes": 2754,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/eval/base/experiment.md"
+    },
+    "eval/base/metrics.json": {
+      "sha256": "048904e6311e4c64de0ef6700bfa91b72c168c8577b28646258a07a6c6b44574",
+      "size_bytes": 745,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/eval/base/metrics.json"
+    },
+    "eval/base/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/eval/base/resolved_config.yaml"
+    },
+    "eval/target_fullft/experiment.md": {
+      "sha256": "761b50862d00898fdb780dcff00bbce7d1badeeb5dbb013f7ed2554adc1635d0",
+      "size_bytes": 2919,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/eval/target_fullft/experiment.md"
+    },
+    "eval/target_fullft/metrics.json": {
+      "sha256": "eba2b3ee943de617d38de4450bc7d05a240a02e5531b74f7710564d981900508",
+      "size_bytes": 764,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/eval/target_fullft/metrics.json"
+    },
+    "eval/target_fullft/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/eval/target_fullft/resolved_config.yaml"
+    },
+    "generated/base/experiment.md": {
+      "sha256": "98caf77d40e574e3c83a827861a861a215eb7ecbeb3cd2b61c0402c3d35a2a42",
+      "size_bytes": 4442,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base/experiment.md"
+    },
+    "generated/base/manifest.json": {
+      "sha256": "f9afb443b8138aacf9216fb8a95cb83e566c79b06fe63fd0fc0dadf196113549",
+      "size_bytes": 1565,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base/manifest.json"
+    },
+    "generated/base/metrics.json": {
+      "sha256": "602cecf1684ff6f2541f1b7ea98baca471e1402d80a0750cf02bb3ba54828cac",
+      "size_bytes": 1972,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base/metrics.json"
+    },
+    "generated/base/resolved_config.yaml": {
+      "sha256": "f31870bad273aae2645ff724015975f901a4433bd7a63535d10115359f2bb19b",
+      "size_bytes": 2851,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base/resolved_config.yaml"
+    },
+    "generated/experiment.md": {
+      "sha256": "f55b84d8a2629aad98c6a19cfecb902e22b82398c46fc29dbb1c01197a0a35c7",
+      "size_bytes": 4758,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/experiment.md"
+    },
+    "generated/manifest.json": {
+      "sha256": "082d55210f29a1bae2f3e028d014383cafdf23bb68822b6d7d34081345c21080",
+      "size_bytes": 1724,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/manifest.json"
+    },
+    "generated/metrics.json": {
+      "sha256": "79e1920bc7be9360f90372a2c9b230ea179f30d74921c1280c2a5cfd463a7717",
+      "size_bytes": 2224,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/metrics.json"
+    },
+    "generated/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/resolved_config.yaml"
+    },
+    "reuse_manifest.json": {
+      "sha256": "7a29235c25423a6c836010cb6dd0d9c44711e76ef0cdb221771297f86cfb5096",
+      "size_bytes": 1548,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/reuse_manifest.json"
+    },
+    "shadows/shadow_00/experiment.md": {
+      "sha256": "05dc3c1c1761f78b63511ecff44ad6d7cb55dcbf62046a7e77058d838edcf3d8",
+      "size_bytes": 2871,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_00/experiment.md"
+    },
+    "shadows/shadow_00/inclusion_summary.json": {
+      "sha256": "0d6e519e1471cef87ccd4a3ae0c33faea4ee6ca4117ef2eaa344bfe41e0219f3",
+      "size_bytes": 149,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_00/inclusion_summary.json"
+    },
+    "shadows/shadow_00/metrics.json": {
+      "sha256": "88c45c9a33f04e85136977271e75d683bf42a3bf9252e6a72df6a7fc519d0009",
+      "size_bytes": 519,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_00/metrics.json"
+    },
+    "shadows/shadow_00/model/_SUCCESS": {
+      "sha256": "672eb8316fec83f94119a4193f9fc552513d56a147502f8be4830e017d817831",
+      "size_bytes": 9,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_00/model/_SUCCESS"
+    },
+    "shadows/shadow_00/model/manifest.json": {
+      "sha256": "98660515c902f058d821c92115f09edc3d8fe6eed6fc74c7b936e738455f91eb",
+      "size_bytes": 615,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_00/model/manifest.json"
+    },
+    "shadows/shadow_00/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_00/resolved_config.yaml"
+    },
+    "shadows/shadow_00/run_manifest.json": {
+      "sha256": "9d914ea798a1dacbf4bc530cb408c186be557c1a08ba9cbcd27aade159ca4e36",
+      "size_bytes": 810,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_00/run_manifest.json"
+    },
+    "shadows/shadow_00/trainer/trainer_state.json": {
+      "sha256": "914287cb3945f1a28396dd17e23c3174d96cb0ba3aff14f5c3d26963ee6695e4",
+      "size_bytes": 24735,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_00/trainer/trainer_state.json"
+    },
+    "shadows/shadow_01/experiment.md": {
+      "sha256": "422b4a60b5b90edd178e2c70b6dbbd80d1de95f376f690e39097e880986e5e19",
+      "size_bytes": 2868,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_01/experiment.md"
+    },
+    "shadows/shadow_01/inclusion_summary.json": {
+      "sha256": "41c05a7b7e7624e9252775d629040ad3efe8f5b6768794932c81026b45330528",
+      "size_bytes": 149,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_01/inclusion_summary.json"
+    },
+    "shadows/shadow_01/metrics.json": {
+      "sha256": "f98ef75f172fcd03ef6b1c483286e543cf1d652893b80b18eab82812f11ffe9a",
+      "size_bytes": 516,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_01/metrics.json"
+    },
+    "shadows/shadow_01/model/_SUCCESS": {
+      "sha256": "672eb8316fec83f94119a4193f9fc552513d56a147502f8be4830e017d817831",
+      "size_bytes": 9,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_01/model/_SUCCESS"
+    },
+    "shadows/shadow_01/model/manifest.json": {
+      "sha256": "86df21c02fa23271a9cc37f88e725fb98a682b22ed109a173e8bf01beb27889f",
+      "size_bytes": 615,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_01/model/manifest.json"
+    },
+    "shadows/shadow_01/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_01/resolved_config.yaml"
+    },
+    "shadows/shadow_01/run_manifest.json": {
+      "sha256": "365ecedd39d122cffaf21f2475c37f2091f06255d9fd0f90bfb8b0067651070f",
+      "size_bytes": 810,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_01/run_manifest.json"
+    },
+    "shadows/shadow_01/trainer/trainer_state.json": {
+      "sha256": "2f9df28139790454bc87513dd0c059e10de76c9c94ee8f250afeac367d2516ca",
+      "size_bytes": 24728,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_01/trainer/trainer_state.json"
+    },
+    "shadows/shadow_02/experiment.md": {
+      "sha256": "475d3f91907a208b6cf8ee3a6e4f402ea095e69ce0a2345147fa9bb2327bef3d",
+      "size_bytes": 2870,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_02/experiment.md"
+    },
+    "shadows/shadow_02/inclusion_summary.json": {
+      "sha256": "98f01b69af72d878cb2d6ae920de617e227a5338353d29e0a2aa0e50376851f2",
+      "size_bytes": 149,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_02/inclusion_summary.json"
+    },
+    "shadows/shadow_02/metrics.json": {
+      "sha256": "b264cbe5dad7ab3ddc8ebd93404952f84eb7b21fa1870d6beb021e560048c61c",
+      "size_bytes": 518,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_02/metrics.json"
+    },
+    "shadows/shadow_02/model/_SUCCESS": {
+      "sha256": "672eb8316fec83f94119a4193f9fc552513d56a147502f8be4830e017d817831",
+      "size_bytes": 9,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_02/model/_SUCCESS"
+    },
+    "shadows/shadow_02/model/manifest.json": {
+      "sha256": "33674de28e3d2b111705e044c817537216d729901e53906a87c2091fdd98eb3d",
+      "size_bytes": 615,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_02/model/manifest.json"
+    },
+    "shadows/shadow_02/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_02/resolved_config.yaml"
+    },
+    "shadows/shadow_02/run_manifest.json": {
+      "sha256": "994f11735d3fd1119cbba29bb4f6ece979181533fe952e6338e5e6f0dc19778c",
+      "size_bytes": 810,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_02/run_manifest.json"
+    },
+    "shadows/shadow_02/trainer/trainer_state.json": {
+      "sha256": "fece913e451caee6ebb59363c0c86fb2f62d2bd8b91bd345b93bbbcef636558f",
+      "size_bytes": 24733,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_02/trainer/trainer_state.json"
+    },
+    "shadows/shadow_03/experiment.md": {
+      "sha256": "9b867c156243856d2c79105b9965f95e59b086ef0901bcbc9eabeee217249b6d",
+      "size_bytes": 2868,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_03/experiment.md"
+    },
+    "shadows/shadow_03/inclusion_summary.json": {
+      "sha256": "9cf90cbb337616403249240c83597f88d3dd44eaaa2e4af058a972c566f18c37",
+      "size_bytes": 149,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_03/inclusion_summary.json"
+    },
+    "shadows/shadow_03/metrics.json": {
+      "sha256": "af49c31f76392054911f3bc5d1ecc88dc3a2fab211f794ccd103c42eb6785631",
+      "size_bytes": 516,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_03/metrics.json"
+    },
+    "shadows/shadow_03/model/_SUCCESS": {
+      "sha256": "672eb8316fec83f94119a4193f9fc552513d56a147502f8be4830e017d817831",
+      "size_bytes": 9,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_03/model/_SUCCESS"
+    },
+    "shadows/shadow_03/model/manifest.json": {
+      "sha256": "3c01fed41d35bfe47b9f04af4e6df271d1b81d3fe79f15e6c0c1fce43b7b2339",
+      "size_bytes": 615,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_03/model/manifest.json"
+    },
+    "shadows/shadow_03/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_03/resolved_config.yaml"
+    },
+    "shadows/shadow_03/run_manifest.json": {
+      "sha256": "d8679549c71df347bf146951c0c09370d14f31f93b2fe0fd5b0c2e629ffc6b50",
+      "size_bytes": 810,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_03/run_manifest.json"
+    },
+    "shadows/shadow_03/trainer/trainer_state.json": {
+      "sha256": "e47c6f962fcaa84ed46b5161b66513a0941e82eabba6336eaff25deadc2a1275",
+      "size_bytes": 24743,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_03/trainer/trainer_state.json"
+    },
+    "shadows/shadow_04/experiment.md": {
+      "sha256": "35b12d9be8a3d24a2e31123e4d463c54c6dcd1529eb8a09266313ba41bfbef3a",
+      "size_bytes": 2870,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_04/experiment.md"
+    },
+    "shadows/shadow_04/inclusion_summary.json": {
+      "sha256": "0ae72cf13718fa83d86480c7ba0670b8fde3acb68332b4231b0e29c6c90b7d8b",
+      "size_bytes": 149,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_04/inclusion_summary.json"
+    },
+    "shadows/shadow_04/metrics.json": {
+      "sha256": "9537c0b1887b3c9339681c4bbe9aa50727f82c4f4dcda55baefbe33a8aa80da6",
+      "size_bytes": 518,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_04/metrics.json"
+    },
+    "shadows/shadow_04/model/_SUCCESS": {
+      "sha256": "672eb8316fec83f94119a4193f9fc552513d56a147502f8be4830e017d817831",
+      "size_bytes": 9,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_04/model/_SUCCESS"
+    },
+    "shadows/shadow_04/model/manifest.json": {
+      "sha256": "fa43e28190df786d3561d304f4636b55c544ca2369d20387c097f15a8d486df1",
+      "size_bytes": 615,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_04/model/manifest.json"
+    },
+    "shadows/shadow_04/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_04/resolved_config.yaml"
+    },
+    "shadows/shadow_04/run_manifest.json": {
+      "sha256": "b784ca1c5593e67df1c501b0eb6818b08f412f8b6858fcc558bcd4295b884079",
+      "size_bytes": 810,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_04/run_manifest.json"
+    },
+    "shadows/shadow_04/trainer/trainer_state.json": {
+      "sha256": "d799f77f42319cc0b9e5de5a98644fcd29f5d950f793a41688098eb05e6e1d14",
+      "size_bytes": 24737,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/shadows/shadow_04/trainer/trainer_state.json"
+    },
+    "storage_preflight.json": {
+      "sha256": "cada41bd895f937a5370c96fe4fab3cad50fd906fbd7acf9a2df9da996028e17",
+      "size_bytes": 263,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/storage_preflight.json"
+    },
+    "target/seed_42/experiment.md": {
+      "sha256": "a4723abdd131c1784f89dcc181f3b3f96c1f95877cf8c4da1b1ca94a3ac6abd6",
+      "size_bytes": 2851,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/experiment.md"
+    },
+    "target/seed_42/metrics.json": {
+      "sha256": "5a3cb10ea8450da091342b9002523ba9cfa40014e7d08c6985c0437770125369",
+      "size_bytes": 514,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/metrics.json"
+    },
+    "target/seed_42/model/_SUCCESS": {
+      "sha256": "672eb8316fec83f94119a4193f9fc552513d56a147502f8be4830e017d817831",
+      "size_bytes": 9,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/model/_SUCCESS"
+    },
+    "target/seed_42/model/manifest.json": {
+      "sha256": "9a108984fc490467a96bb91f1c902332c001d1a0c52d5fb276dca9b1b3852830",
+      "size_bytes": 615,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/model/manifest.json"
+    },
+    "target/seed_42/resolved_config.yaml": {
+      "sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+      "size_bytes": 2844,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/resolved_config.yaml"
+    },
+    "target/seed_42/run_manifest.json": {
+      "sha256": "35a8ef3108169e2888fcada7c062e8d997b5a440e9c0f06c5134b48c0ec0be29",
+      "size_bytes": 808,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/run_manifest.json"
+    },
+    "target/seed_42/trainer/trainer_state.json": {
+      "sha256": "b71eadbb5bb3991e89f14d812993314fc6cb720016b9c625f1659dde2bef1895",
+      "size_bytes": 24713,
+      "source": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/trainer/trainer_state.json"
+    }
+  },
+  "formal_components": {
+    "analysis_feature": "relative_log_likelihood",
+    "attack": "online_rmia",
+    "evaluation_variants": [
+      "base",
+      "target_fullft"
+    ],
+    "generation_variants": [
+      "base",
+      "target_fullft"
+    ],
+    "shadow_models": 5,
+    "target_models": 1
+  },
+  "model": "olmo_1b_hf",
+  "output_root": "outputs/squad_fullft_rmia/formal/olmo_1b_hf",
+  "plan": "references/squad_fullft_rmia_experiment_plan.md",
+  "recorded_source_status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh",
+  "schema_version": 1,
+  "source_branch": "codex/squad-lora-rmia",
+  "source_commit": "c3d3cd79a4b09aa12187ec462e1776033647b506"
+}

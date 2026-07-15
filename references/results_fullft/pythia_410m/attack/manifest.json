@@ -1,0 +1,25 @@
+{
+  "config_sha256": "8ed3376a0bbffe7e5fe71ca5df329d796b279f15a042059d7c732eb038855030",
+  "file_sha256": {
+    "metrics": "1f9df6fdcb462f15b19500d372c28cb5fde3d0fa29627fc7a392b2d06375db0f",
+    "scores": "b40e41626d8fc1284f8fb181707582f3bf987fad883324ff1c57a5bef24c12e2"
+  },
+  "files": {
+    "metrics": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/attack/metrics.json",
+    "scores": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/attack/online_rmia_scores.jsonl"
+  },
+  "model": "EleutherAI/pythia-410m",
+  "row_counts": {
+    "candidates": 5248,
+    "population": 1024,
+    "shadow_models": 5
+  },
+  "seed": 42,
+  "source_commit": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "c3d3cd79a4b09aa12187ec462e1776033647b506",
+    "short_commit": "c3d3cd7",
+    "status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh"
+  },
+  "tokenizer": "EleutherAI/pythia-410m"
+}

@@ -1,0 +1,33 @@
+{
+  "config_sha256": "8ed3376a0bbffe7e5fe71ca5df329d796b279f15a042059d7c732eb038855030",
+  "file_sha256": {
+    "evaluator_mapping": "413e7cfaf1d18707d25096d10b402afd2b9a82f5a0a7ed416c3c2d74cc4f0019",
+    "public_candidates": "5728b27acf751f01e552ff70a81ca553f4dbcee2df3602268a5e8db7824ea85e",
+    "raw_private_provenance": "50d62f972168c62612d13035904640abffa7facd6e9699c9f93fa0b7c85cdbd7",
+    "raw_public_candidates": "be455facec8242234b759ca95e3c70e8224981804a35dffb00dd1afb45f47def",
+    "shadow_masks": "b6a9d0e901042f596e310e062c7b7f5b369a2a33117e9afcf183ddfd28da9f1d"
+  },
+  "files": {
+    "evaluator_mapping": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/candidates/evaluator_mapping.jsonl",
+    "public_candidates": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/candidates/public_candidates.jsonl",
+    "raw_private_provenance": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/candidates/raw_private_provenance.jsonl",
+    "raw_public_candidates": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/candidates/raw_public_candidates.jsonl",
+    "shadow_masks": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/pythia_410m/candidates/shadow_masks.csv"
+  },
+  "model": "EleutherAI/pythia-410m",
+  "row_counts": {
+    "evaluator_mapping": 6144,
+    "public_candidates": 5248,
+    "raw_private_provenance": 6144,
+    "raw_public_candidates": 6144,
+    "shadow_models": 5
+  },
+  "seed": 42,
+  "source_commit": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "c3d3cd79a4b09aa12187ec462e1776033647b506",
+    "short_commit": "c3d3cd7",
+    "status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh"
+  },
+  "tokenizer": "EleutherAI/pythia-410m"
+}

@@ -1,0 +1,11 @@
+{
+  "config_sha256": "8ed3376a0bbffe7e5fe71ca5df329d796b279f15a042059d7c732eb038855030",
+  "file_sha256": {
+    "config.json": "e2a9e9a0c96d9430e42a8ea900ecfb4cdf3e52d1d94c9d5f59fb542eff35ccff",
+    "generation_config.json": "57d41837d0889c975b1b3666a8d0afac3d028ac03e99cbde3941073b192f0d13",
+    "model.safetensors": "c3cc7639c04a27e2db7c3539e1cf9c2e40753653fa3b50e6d888f4db02ab1b2c",
+    "tokenizer.json": "9e286b858bb00093fa93f50982798afd9f6b31c28e4d7c2d08adcd68d83a2695",
+    "tokenizer_config.json": "f6013726b45b541b3c2d0d8a9fb2e1aa7011aad7985b02b42ce8d154136bed26"
+  },
+  "format": "full_model_safetensors"
+}

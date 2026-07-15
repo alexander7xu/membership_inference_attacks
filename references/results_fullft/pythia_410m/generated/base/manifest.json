@@ -1,0 +1,32 @@
+{
+  "config_sha256": "58f8152f045f2d49dd85297b7ca6ee994027b6e74ba142c4831fba7cc2534e35",
+  "file_sha256": {
+    "metrics": "b326e0832c5134ef57e76a77e20b6fda4c4f18813e85efb3286de6173ef9e354",
+    "private_generated_labels": "46800149db0a0bfd5e07db67194d62a43069fe5db866bf16190d43d51f54a697",
+    "public_generated": "233c47f2ff2c4abacb7da55fb8216e16a350ec3003ae90e7dac091a530cccf42",
+    "resolved_config": "58f8152f045f2d49dd85297b7ca6ee994027b6e74ba142c4831fba7cc2534e35"
+  },
+  "files": {
+    "metrics": "outputs/squad_fullft_rmia/formal/pythia_410m/generated/base/metrics.json",
+    "private_generated_labels": "outputs/squad_fullft_rmia/formal/pythia_410m/generated/base/private_generated_labels.jsonl",
+    "public_generated": "outputs/squad_fullft_rmia/formal/pythia_410m/generated/base/public_generated.jsonl",
+    "resolved_config": "outputs/squad_fullft_rmia/formal/pythia_410m/generated/base/resolved_config.yaml"
+  },
+  "generation_source": {
+    "checkpoint": null,
+    "model": "EleutherAI/pythia-410m@9879c9b5f8bea9051dcb0e68dff21493d67e9d4f"
+  },
+  "model": "EleutherAI/pythia-410m",
+  "row_counts": {
+    "private_generated_labels": 3072,
+    "public_generated": 3072
+  },
+  "seed": 42,
+  "source_commit": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "c3d3cd79a4b09aa12187ec462e1776033647b506",
+    "short_commit": "c3d3cd7",
+    "status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh"
+  },
+  "tokenizer": "EleutherAI/pythia-410m"
+}

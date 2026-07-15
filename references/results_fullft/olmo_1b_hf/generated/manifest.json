@@ -1,0 +1,32 @@
+{
+  "config_sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+  "file_sha256": {
+    "metrics": "79e1920bc7be9360f90372a2c9b230ea179f30d74921c1280c2a5cfd463a7717",
+    "private_generated_labels": "7554f9ac5f3ecd9d0c79f2d56d0f80bdfef27ce0fe313880ebdb71704ecfb0fe",
+    "public_generated": "cd4661844479766d2bbfdf88796dd1d37806e32773e16d0c9e0ad247a194dc4e",
+    "resolved_config": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8"
+  },
+  "files": {
+    "metrics": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/metrics.json",
+    "private_generated_labels": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/private_generated_labels.jsonl",
+    "public_generated": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/public_generated.jsonl",
+    "resolved_config": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/resolved_config.yaml"
+  },
+  "generation_source": {
+    "checkpoint": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/model",
+    "model": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/target/seed_42/model"
+  },
+  "model": "allenai/OLMo-1B-hf",
+  "row_counts": {
+    "private_generated_labels": 3072,
+    "public_generated": 3072
+  },
+  "seed": 42,
+  "source_commit": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "c3d3cd79a4b09aa12187ec462e1776033647b506",
+    "short_commit": "c3d3cd7",
+    "status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh"
+  },
+  "tokenizer": "allenai/OLMo-1B-hf"
+}

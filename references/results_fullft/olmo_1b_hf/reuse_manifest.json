@@ -1,0 +1,35 @@
+{
+  "base_generation": {
+    "path": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base",
+    "reason": "Base-generation public candidate IDs are missing or duplicated.",
+    "source_split_sha256": {
+      "squad_target_train.jsonl": "fc538bddab61388544894c2443cc2edb0042931c82c62d40509c56c301da23ae",
+      "squad_validation_candidates.jsonl": "8c39e2055b3a71f897216c1e28fe98204d7577be85427c5ac5a26733570d8132",
+      "trivia_validation_candidates.jsonl": "6813cba3a4ab06e3c8271d701127d50cefc934b0beaf0bec0fbf7e0e18517544"
+    },
+    "status": "regenerate"
+  },
+  "split_artifact": {
+    "file_sha256": {
+      "squad_attacker_auxiliary_pool.jsonl": "1baf0f234831beec164c519882bb72d774becc5f25c40258f20b4ee08de65af8",
+      "squad_target_train.jsonl": "fc538bddab61388544894c2443cc2edb0042931c82c62d40509c56c301da23ae",
+      "squad_validation_candidates.jsonl": "8c39e2055b3a71f897216c1e28fe98204d7577be85427c5ac5a26733570d8132",
+      "squad_validation_population.jsonl": "7831c39a09824ea3f8dcde42f23e3ba6171f30ead85994d67b096cea874a3f21",
+      "trivia_validation_candidates.jsonl": "6813cba3a4ab06e3c8271d701127d50cefc934b0beaf0bec0fbf7e0e18517544"
+    },
+    "manifest_sha256": "ee3a45e46ff26e09d1a569b44d8114d81146fac3b167e2c2a390563772ec96de",
+    "path": "data/squad_lora_rmia",
+    "status": "reused",
+    "validated_fields": [
+      "counts",
+      "seed",
+      "split_rule",
+      "squad_config",
+      "squad_dataset",
+      "squad_revision",
+      "trivia_config",
+      "trivia_dataset",
+      "trivia_revision"
+    ]
+  }
+}

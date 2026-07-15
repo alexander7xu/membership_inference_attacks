@@ -1,0 +1,9 @@
+{
+  "free_bytes": 140043582701568,
+  "model_equivalents": 9.0,
+  "passed": true,
+  "required_bytes": 27578185140,
+  "smoke_checkpoint": "outputs/squad_fullft_rmia/smoke/olmo_1b_hf/target/seed_42/model",
+  "smoke_model_bytes": 2357109841,
+  "storage_margin": 0.3
+}

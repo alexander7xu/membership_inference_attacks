@@ -1,0 +1,9 @@
+{
+  "free_bytes": 141625472843776,
+  "model_equivalents": 9.0,
+  "passed": true,
+  "required_bytes": 9526937168,
+  "smoke_checkpoint": "outputs/squad_fullft_rmia/smoke/pythia_410m/target/seed_42/model",
+  "smoke_model_bytes": 814268134,
+  "storage_margin": 0.3
+}
