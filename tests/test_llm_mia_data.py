@@ -1,11 +1,13 @@
 from src.llm_mia.data import (
     QARecord,
+    canonicalize_candidate_rows,
     deduplicate_candidate_rows,
     deterministic_unique_subset,
     read_shadow_masks,
     split_records,
     split_squad_train,
     write_shadow_masks,
+    write_single_shadow_smoke_mask,
 )
 
 
@@ -89,6 +91,27 @@ def test_shadow_masks_are_deterministic_and_have_in_out_models(tmp_path):
     assert all(0 < sum(mask) < 5 for mask in first.values())
 
 
+def test_single_shadow_smoke_mask_is_deterministic_and_bounded(tmp_path):
+    path = tmp_path / "smoke_masks.csv"
+    candidate_ids = [f"cand-{idx}" for idx in range(12)]
+    write_single_shadow_smoke_mask(
+        path,
+        candidate_ids,
+        seed=123,
+        max_included=4,
+    )
+    first = read_shadow_masks(path, require_in_out=False)
+    write_single_shadow_smoke_mask(
+        path,
+        candidate_ids,
+        seed=123,
+        max_included=4,
+    )
+
+    assert first == read_shadow_masks(path, require_in_out=False)
+    assert sum(mask[0] for mask in first.values()) == 4
+
+
 def test_candidate_deduplication_preserves_first_exact_copy():
     public = {
         "candidate_id": "candidate-1",
@@ -126,6 +149,70 @@ def test_candidate_deduplication_rejects_conflicting_labels():
         assert "conflicting" in str(error)
     else:
         raise AssertionError("Conflicting duplicate labels must be rejected.")
+
+
+def test_candidate_canonicalization_preserves_one_to_many_provenance():
+    public_rows = [
+        {
+            "candidate_id": "source-a",
+            "prompt": "prompt",
+            "completion": " completion",
+            "content_sha256": "same-content",
+        },
+        {
+            "candidate_id": "source-b",
+            "prompt": "prompt",
+            "completion": " completion",
+            "content_sha256": "same-content",
+        },
+    ]
+    private_rows = [
+        {
+            "candidate_id": "source-a",
+            "private_group": "group-a",
+            "record_membership_label": 0,
+        },
+        {
+            "candidate_id": "source-b",
+            "private_group": "group-b",
+            "record_membership_label": 0,
+        },
+    ]
+
+    canonical, mapping = canonicalize_candidate_rows(public_rows, private_rows)
+
+    assert len(canonical) == 1
+    assert canonical[0]["candidate_id"] == "candidate_same-content"
+    assert [row["candidate_id"] for row in mapping] == [
+        "candidate_same-content",
+        "candidate_same-content",
+    ]
+    assert [row["source_candidate_id"] for row in mapping] == [
+        "source-a",
+        "source-b",
+    ]
+    assert [row["raw_row_index"] for row in mapping] == [0, 1]
+
+
+def test_candidate_canonicalization_rejects_conflicting_membership_labels():
+    public = {
+        "candidate_id": "source-a",
+        "prompt": "prompt",
+        "completion": " completion",
+        "content_sha256": "same-content",
+    }
+    member = {"candidate_id": "source-a", "record_membership_label": 1}
+    nonmember = {"candidate_id": "source-b", "record_membership_label": 0}
+
+    try:
+        canonicalize_candidate_rows(
+            [public, {**public, "candidate_id": "source-b"}],
+            [member, nonmember],
+        )
+    except ValueError as error:
+        assert "conflicting labels" in str(error)
+    else:
+        raise AssertionError("Conflicting canonical labels must be rejected.")
 
 
 def test_deterministic_unique_subset_skips_duplicates_and_exclusions():

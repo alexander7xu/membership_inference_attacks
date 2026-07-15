@@ -1,0 +1,3 @@
+# @package finetuning
+_target_: src.llm_mia.finetuning.FullFineTuningStrategy
+gradient_checkpointing: true

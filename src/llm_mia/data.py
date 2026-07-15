@@ -265,6 +265,64 @@ def deduplicate_candidate_rows(
     return unique_public, unique_private
 
 
+def canonicalize_candidate_rows(
+    public_rows: list[dict[str, Any]], private_rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Canonicalize model inputs while preserving all evaluator-only provenance."""
+    if len(public_rows) != len(private_rows):
+        raise ValueError("Public candidates and private labels must have equal length.")
+
+    canonical_public: list[dict[str, Any]] = []
+    evaluator_mapping: list[dict[str, Any]] = []
+    canonical_by_content: dict[str, dict[str, Any]] = {}
+    content_by_canonical_id: dict[str, str] = {}
+    labels_by_content: dict[str, int] = {}
+    for raw_index, (public, private) in enumerate(
+        zip(public_rows, private_rows, strict=True)
+    ):
+        source_candidate_id = str(public.get("candidate_id", ""))
+        if not source_candidate_id or source_candidate_id != str(
+            private.get("candidate_id", "")
+        ):
+            raise ValueError("Public candidate and private label IDs must align.")
+        content_hash = str(public.get("content_sha256", ""))
+        if not content_hash:
+            raise ValueError("Public candidates must include content_sha256.")
+        canonical_id = f"candidate_{content_hash[:20]}"
+        previous_hash = content_by_canonical_id.get(canonical_id)
+        if previous_hash is not None and previous_hash != content_hash:
+            raise ValueError(f"Canonical candidate ID collision: {canonical_id}")
+        content_by_canonical_id[canonical_id] = content_hash
+
+        model_row = {
+            "candidate_id": canonical_id,
+            "prompt": str(public["prompt"]),
+            "completion": str(public["completion"]),
+            "content_sha256": content_hash,
+        }
+        previous_public = canonical_by_content.get(content_hash)
+        if previous_public is None:
+            canonical_by_content[content_hash] = model_row
+            canonical_public.append(model_row)
+        elif previous_public != model_row:
+            raise ValueError("Equal content hashes have different model text.")
+
+        label = int(private.get("record_membership_label", 0))
+        previous_label = labels_by_content.get(content_hash)
+        if previous_label is not None and previous_label != label:
+            raise ValueError("Duplicate candidate content has conflicting labels.")
+        labels_by_content[content_hash] = label
+        evaluator_mapping.append(
+            {
+                **private,
+                "candidate_id": canonical_id,
+                "source_candidate_id": source_candidate_id,
+                "raw_row_index": raw_index,
+            }
+        )
+    return canonical_public, evaluator_mapping
+
+
 def candidate_id(prefix: str, record: QARecord) -> str:
     return f"{prefix}_{record.content_sha256[:20]}"
 
@@ -336,7 +394,39 @@ def write_shadow_masks(
             writer.writerow(row)
 
 
-def read_shadow_masks(path: Path) -> dict[str, list[int]]:
+def write_single_shadow_smoke_mask(
+    path: Path,
+    candidate_ids: list[str],
+    *,
+    seed: int,
+    max_included: int,
+) -> None:
+    """Write a bounded one-shadow inclusion mask for training-only smoke tests."""
+    if max_included < 1:
+        raise ValueError("Smoke mask must include at least one candidate.")
+    if len(set(candidate_ids)) != len(candidate_ids):
+        raise ValueError("Smoke candidate IDs must be unique.")
+    ranked = sorted(
+        candidate_ids,
+        key=lambda candidate: stable_hash_int(seed, f"smoke-shadow:{candidate}"),
+    )
+    included = set(ranked[: min(max_included, len(ranked))])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["candidate_id", "shadow_00"])
+        writer.writeheader()
+        for candidate in candidate_ids:
+            writer.writerow(
+                {
+                    "candidate_id": candidate,
+                    "shadow_00": int(candidate in included),
+                }
+            )
+
+
+def read_shadow_masks(
+    path: Path, *, require_in_out: bool = True
+) -> dict[str, list[int]]:
     with path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
         result: dict[str, list[int]] = {}
@@ -345,7 +435,11 @@ def read_shadow_masks(path: Path) -> dict[str, list[int]]:
         ]
         for row in reader:
             mask = [int(row[name]) for name in shadow_fields]
-            if not 0 < sum(mask) < len(mask):
+            if not mask or any(value not in (0, 1) for value in mask):
+                raise ValueError(
+                    f"Candidate {row['candidate_id']} has an invalid mask."
+                )
+            if require_in_out and not 0 < sum(mask) < len(mask):
                 raise ValueError(
                     f"Candidate {row['candidate_id']} does not have both IN and OUT shadows."
                 )

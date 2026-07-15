@@ -6,40 +6,49 @@ import statistics
 from collections.abc import Sequence
 from pathlib import Path
 
-CANDIDATE_GROUPS = (
-    "gold_squad_target_train",
-    "base_gen_from_squad_train",
-    "lora_gen_from_squad_train",
-    "gold_squad_validation",
-    "base_gen_from_squad_validation",
-    "lora_gen_from_squad_validation",
-    "gold_trivia_validation",
-    "base_gen_from_trivia_validation",
-    "lora_gen_from_trivia_validation",
+_SOURCE_ROWS = (
+    ("squad_train", "gold_squad_target_train", "squad_train"),
+    ("squad_validation", "gold_squad_validation", "squad_validation"),
+    ("trivia_validation", "gold_trivia_validation", "trivia_validation"),
 )
 
-GROUP_SOURCE = {
-    "gold_squad_target_train": "squad_train",
-    "base_gen_from_squad_train": "squad_train",
-    "lora_gen_from_squad_train": "squad_train",
-    "gold_squad_validation": "squad_validation",
-    "base_gen_from_squad_validation": "squad_validation",
-    "lora_gen_from_squad_validation": "squad_validation",
-    "gold_trivia_validation": "trivia_validation",
-    "base_gen_from_trivia_validation": "trivia_validation",
-    "lora_gen_from_trivia_validation": "trivia_validation",
-}
+
+def candidate_groups_for_variant(variant: str) -> tuple[str, ...]:
+    if variant not in {"lora", "fullft"}:
+        raise ValueError(f"Unsupported generated-text variant: {variant}")
+    groups: list[str] = []
+    for _, gold_group, source_suffix in _SOURCE_ROWS:
+        groups.extend(
+            (
+                gold_group,
+                f"base_gen_from_{source_suffix}",
+                f"{variant}_gen_from_{source_suffix}",
+            )
+        )
+    return tuple(groups)
+
+
+CANDIDATE_GROUPS = candidate_groups_for_variant("lora")
+FULLFT_CANDIDATE_GROUPS = candidate_groups_for_variant("fullft")
+
+GROUP_SOURCE: dict[str, str] = {}
+for source, gold_group, source_suffix in _SOURCE_ROWS:
+    GROUP_SOURCE[gold_group] = source
+    GROUP_SOURCE[f"base_gen_from_{source_suffix}"] = source
+    GROUP_SOURCE[f"lora_gen_from_{source_suffix}"] = source
+    GROUP_SOURCE[f"fullft_gen_from_{source_suffix}"] = source
 
 GROUP_VARIANT = {
-    "gold_squad_target_train": "gold",
-    "base_gen_from_squad_train": "base_generated",
-    "lora_gen_from_squad_train": "lora_generated",
-    "gold_squad_validation": "gold",
-    "base_gen_from_squad_validation": "base_generated",
-    "lora_gen_from_squad_validation": "lora_generated",
-    "gold_trivia_validation": "gold",
-    "base_gen_from_trivia_validation": "base_generated",
-    "lora_gen_from_trivia_validation": "lora_generated",
+    group: (
+        "gold"
+        if group.startswith("gold_")
+        else "base_generated"
+        if group.startswith("base_gen_")
+        else "lora_generated"
+        if group.startswith("lora_gen_")
+        else "fullft_generated"
+    )
+    for group in CANDIDATE_GROUPS + FULLFT_CANDIDATE_GROUPS
 }
 
 SOURCE_LABELS = {
@@ -58,12 +67,14 @@ VARIANT_LABELS = {
     "gold": "Gold answer",
     "base_generated": "Base generated",
     "lora_generated": "LoRA generated",
+    "fullft_generated": "Full-FT generated",
 }
 
 VARIANT_LINESTYLES = {
     "gold": "-",
     "base_generated": "--",
     "lora_generated": ":",
+    "fullft_generated": ":",
 }
 
 
@@ -289,6 +300,9 @@ def plot_group_feature_ecdf(
         )
         for source in SOURCE_LABELS
     ]
+    plotted_variants = tuple(
+        dict.fromkeys(GROUP_VARIANT[group] for group in group_order)
+    )
     variant_handles = [
         Line2D(
             [0],
@@ -298,7 +312,7 @@ def plot_group_feature_ecdf(
             linestyle=VARIANT_LINESTYLES[variant],
             label=VARIANT_LABELS[variant],
         )
-        for variant in VARIANT_LABELS
+        for variant in plotted_variants
     ]
     source_legend = axis.legend(
         handles=source_handles,

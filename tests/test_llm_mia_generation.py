@@ -44,7 +44,8 @@ def test_base_generation_uses_base_model_and_separate_directory(
 
     assert len(calls) == 1
     _, kwargs = calls[0]
-    assert kwargs["adapter_path"] is None
+    assert kwargs["checkpoint_path"] is None
+    assert kwargs["group_prefix"] == "gen"
     assert kwargs["model_run_id"] == "owner/test-model@revision123"
     assert kwargs["run_dir"] == (
         tmp_path
@@ -56,13 +57,13 @@ def test_base_generation_uses_base_model_and_separate_directory(
     )
 
 
-def test_target_generation_keeps_existing_directory_and_adapter(
+def test_target_generation_keeps_existing_directory_and_checkpoint(
     tmp_path: Path, monkeypatch
 ) -> None:
     cfg = _config()
-    adapter = tmp_path / "adapter"
+    checkpoint = tmp_path / "adapter"
     calls = []
-    monkeypatch.setattr(workflow, "train_target", lambda *args, **kwargs: adapter)
+    monkeypatch.setattr(workflow, "train_target", lambda *args, **kwargs: checkpoint)
     monkeypatch.setattr(
         workflow,
         "_generate_candidates",
@@ -78,8 +79,9 @@ def test_target_generation_keeps_existing_directory_and_adapter(
 
     assert len(calls) == 1
     _, kwargs = calls[0]
-    assert kwargs["adapter_path"] == adapter
-    assert kwargs["model_run_id"] == str(adapter)
+    assert kwargs["checkpoint_path"] == checkpoint
+    assert kwargs["group_prefix"] == "gen"
+    assert kwargs["model_run_id"] == str(checkpoint)
     assert kwargs["run_dir"] == (
         tmp_path / "outputs/squad_lora_rmia" / "formal" / "test_model" / "generated"
     )

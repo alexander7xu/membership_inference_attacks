@@ -4,12 +4,14 @@ import gc
 import json
 import logging
 import math
+import shutil
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 import torch
 from datasets import load_dataset
+from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from sklearn.metrics import roc_auc_score
 
@@ -30,7 +32,7 @@ from src.llm_mia.analysis import (
 from src.llm_mia.data import (
     QARecord,
     candidate_id,
-    deduplicate_candidate_rows,
+    canonicalize_candidate_rows,
     deterministic_subset,
     deterministic_unique_subset,
     file_sha256,
@@ -38,6 +40,7 @@ from src.llm_mia.data import (
     read_json,
     read_jsonl,
     read_shadow_masks,
+    record_from_json,
     record_from_public_candidate,
     record_to_json,
     split_records,
@@ -48,13 +51,16 @@ from src.llm_mia.data import (
     write_json,
     write_jsonl,
     write_shadow_masks,
+    write_single_shadow_smoke_mask,
+)
+from src.llm_mia.finetuning import (
+    FineTuningStrategy,
+    LoraFineTuningStrategy,
 )
 from src.llm_mia.hf import (
-    attach_lora,
     ensure_token_embeddings,
     generate_completions,
     load_causal_lm,
-    load_model_for_inference,
     load_tokenizer,
     make_trainer,
     materialize_records,
@@ -62,14 +68,38 @@ from src.llm_mia.hf import (
 )
 from src.llm_mia.metrics import exact_match, mean, perplexity, token_f1
 from src.llm_mia.plotting import (
-    CANDIDATE_GROUPS,
+    candidate_groups_for_variant,
     plot_group_feature_ecdf,
     sample_group_candidates,
     summarize_group_features,
 )
+from src.llm_mia.reuse import (
+    ReuseValidationError,
+    validate_base_generation_artifact,
+    validate_split_artifact,
+)
 
 LOGGER = logging.getLogger(__name__)
 _ACTIVE_WANDB_RUN: ContextVar[Any | None] = ContextVar("active_wandb_run", default=None)
+
+
+def fine_tuning_strategy(cfg: DictConfig) -> FineTuningStrategy:
+    target = OmegaConf.select(cfg, "finetuning._target_")
+    strategy = (
+        LoraFineTuningStrategy()
+        if target is None
+        else instantiate(cfg.finetuning, _convert_="partial")
+    )
+    required = (
+        "checkpoint_dirname",
+        "prepare_model",
+        "validate_trainable",
+        "save_final",
+        "load_for_inference",
+    )
+    if any(not hasattr(strategy, name) for name in required):
+        raise TypeError(f"Invalid fine-tuning strategy: {type(strategy).__name__}")
+    return strategy
 
 
 def run_stage(cfg: DictConfig, *, command: str) -> None:
@@ -125,6 +155,9 @@ def run_pipeline(
     smoke: bool,
 ) -> None:
     prepare_data(cfg, project_root)
+    prepare_reuse_manifest(cfg, project_root=project_root, smoke=smoke)
+    if not smoke:
+        verify_formal_storage(cfg, project_root=project_root)
     train_target(cfg, project_root=project_root, command=command, smoke=smoke)
     evaluate_all(cfg, project_root=project_root, command=command, smoke=smoke)
     generate_target_candidates(
@@ -132,7 +165,10 @@ def run_pipeline(
     )
     build_candidate_set(cfg, project_root=project_root, smoke=smoke)
     train_shadows(cfg, project_root=project_root, command=command, smoke=smoke)
-    run_attack(cfg, project_root=project_root, command=command, smoke=smoke)
+    if smoke:
+        LOGGER.info("Smoke completed; online RMIA requires the five-shadow formal run.")
+    else:
+        run_attack(cfg, project_root=project_root, command=command, smoke=False)
 
 
 def profile_name(cfg: DictConfig, smoke: bool) -> str:
@@ -146,6 +182,27 @@ def model_root(cfg: DictConfig, project_root: Path, *, smoke: bool) -> Path:
         / profile_name(cfg, smoke)
         / str(cfg.model.key)
     )
+
+
+def target_checkpoint_path(cfg: DictConfig, project_root: Path, *, smoke: bool) -> Path:
+    strategy = fine_tuning_strategy(cfg)
+    return (
+        model_root(cfg, project_root, smoke=smoke)
+        / "target"
+        / f"seed_{int(cfg.runtime.seed)}"
+        / strategy.checkpoint_dirname
+    )
+
+
+def shadow_checkpoint_paths(
+    cfg: DictConfig, project_root: Path, *, smoke: bool
+) -> list[Path]:
+    strategy = fine_tuning_strategy(cfg)
+    root = model_root(cfg, project_root, smoke=smoke) / "shadows"
+    return [
+        root / f"shadow_{index:02d}" / strategy.checkpoint_dirname
+        for index in range(shadow_count(cfg, smoke))
+    ]
 
 
 def _start_wandb_run(
@@ -186,6 +243,7 @@ def _log_wandb_stage(
     stage: str,
     metrics: dict[str, float],
     paths: dict[str, Path],
+    reference_paths: dict[str, Path] | None = None,
 ) -> dict[str, str]:
     run = _ACTIVE_WANDB_RUN.get()
     if run is None:
@@ -203,6 +261,10 @@ def _log_wandb_stage(
             artifact.add_dir(str(path), name=name)
         elif path.exists():
             artifact.add_file(str(path), name=name)
+    for name, path in (reference_paths or {}).items():
+        if not path.exists():
+            raise FileNotFoundError(f"Reference artifact path is missing: {path}")
+        artifact.add_reference(path.resolve().as_uri(), name=name)
     run.log_artifact(artifact)
     return {f"wandb_{stage}_artifact": f"{artifact.name}:{artifact.digest}"}
 
@@ -358,6 +420,156 @@ def eval_limit(cfg: DictConfig, smoke: bool) -> int | None:
     return None if value is None else int(value)
 
 
+def _base_generation_source_ids(
+    cfg: DictConfig, project_root: Path, *, smoke: bool
+) -> dict[str, list[str]]:
+    limit = candidate_limit(cfg, smoke)
+    specifications = (
+        (
+            "gen_from_squad_train",
+            "squad_target_train",
+            "gen_from_squad_train",
+        ),
+        (
+            "gen_from_squad_validation",
+            "squad_validation_candidates",
+            "gen_from_squad_validation",
+        ),
+        (
+            "gen_from_trivia_validation",
+            "trivia_validation_candidates",
+            "gen_from_trivia_validation",
+        ),
+    )
+    return {
+        group: [
+            record.record_id
+            for record in deterministic_subset(
+                load_split_file(cfg, project_root, split_name),
+                seed=int(cfg.runtime.seed),
+                limit=limit,
+                namespace=namespace,
+            )
+        ]
+        for group, split_name, namespace in specifications
+    }
+
+
+def prepare_reuse_manifest(
+    cfg: DictConfig, *, project_root: Path, smoke: bool
+) -> dict[str, Any] | None:
+    strategy = fine_tuning_strategy(cfg)
+    if smoke or strategy.name != "full" or not bool(cfg.reuse.enabled):
+        return None
+
+    split_root = project_root / str(cfg.reuse.split_root)
+    split_record = validate_split_artifact(split_root, _data_manifest_expected(cfg))
+    split_record["path"] = str(split_root.relative_to(project_root))
+    base_root = (
+        project_root
+        / str(cfg.reuse.base_generation_root)
+        / str(cfg.model.key)
+        / "generated"
+        / "base"
+    )
+    generation_config = {
+        "do_sample": bool(cfg.generation.do_sample),
+        "temperature": float(cfg.generation.temperature),
+        "max_new_tokens": int(cfg.generation.max_new_tokens),
+    }
+    try:
+        base_record = validate_base_generation_artifact(
+            base_root,
+            expected_model_run_id=f"{cfg.model.name_or_path}@{cfg.model.revision}",
+            expected_tokenizer_id=str(cfg.model.name_or_path),
+            expected_source_ids=_base_generation_source_ids(
+                cfg, project_root, smoke=False
+            ),
+            expected_generation_config=generation_config,
+        )
+        base_record["path"] = str(base_root.relative_to(project_root))
+    except ReuseValidationError as error:
+        base_record = {
+            "status": "regenerate",
+            "reason": str(error),
+            "path": str(
+                (
+                    model_root(cfg, project_root, smoke=False) / "generated" / "base"
+                ).relative_to(project_root)
+            ),
+        }
+    split_hashes = split_record["file_sha256"]
+    base_record["source_split_sha256"] = {
+        name: split_hashes[name]
+        for name in (
+            "squad_target_train.jsonl",
+            "squad_validation_candidates.jsonl",
+            "trivia_validation_candidates.jsonl",
+        )
+    }
+    manifest = {
+        "split_artifact": split_record,
+        "base_generation": base_record,
+    }
+    write_json(
+        model_root(cfg, project_root, smoke=False) / "reuse_manifest.json",
+        manifest,
+    )
+    return manifest
+
+
+def base_generation_dir(cfg: DictConfig, project_root: Path, *, smoke: bool) -> Path:
+    own_path = model_root(cfg, project_root, smoke=smoke) / "generated" / "base"
+    if smoke or fine_tuning_strategy(cfg).name != "full":
+        return own_path
+    manifest = prepare_reuse_manifest(cfg, project_root=project_root, smoke=False)
+    if manifest is None:
+        return own_path
+    record = manifest["base_generation"]
+    if record["status"] == "reused":
+        return project_root / str(record["path"])
+    return own_path
+
+
+def verify_formal_storage(cfg: DictConfig, *, project_root: Path) -> None:
+    strategy = fine_tuning_strategy(cfg)
+    if strategy.name != "full":
+        return
+    smoke_checkpoint = target_checkpoint_path(cfg, project_root, smoke=True)
+    if not strategy.checkpoint_is_complete(smoke_checkpoint):
+        raise FileNotFoundError(
+            "A verified full-FT target smoke checkpoint is required before formal "
+            f"launch: {smoke_checkpoint}"
+        )
+    model_bytes = sum(
+        path.stat().st_size for path in smoke_checkpoint.rglob("*") if path.is_file()
+    )
+    model_equivalents = 6.0 + float(cfg.checkpoint.active_checkpoint_model_equivalents)
+    required_bytes = math.ceil(
+        model_bytes * model_equivalents * (1.0 + float(cfg.checkpoint.storage_margin))
+    )
+    output_root = project_root / str(cfg.paths.output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    free_bytes = shutil.disk_usage(output_root).free
+    record = {
+        "smoke_checkpoint": str(smoke_checkpoint.relative_to(project_root)),
+        "smoke_model_bytes": model_bytes,
+        "model_equivalents": model_equivalents,
+        "storage_margin": float(cfg.checkpoint.storage_margin),
+        "required_bytes": required_bytes,
+        "free_bytes": free_bytes,
+        "passed": free_bytes >= required_bytes,
+    }
+    write_json(
+        model_root(cfg, project_root, smoke=False) / "storage_preflight.json", record
+    )
+    if not record["passed"]:
+        raise OSError(
+            f"Insufficient storage for formal full-FT run: required={required_bytes}, "
+            f"free={free_bytes}."
+        )
+
+
 def shadow_count(cfg: DictConfig, smoke: bool) -> int:
     return int(cfg.shadow.smoke_count if smoke else cfg.shadow.count)
 
@@ -365,6 +577,118 @@ def shadow_count(cfg: DictConfig, smoke: bool) -> int:
 def max_steps(cfg: DictConfig, smoke: bool) -> int | None:
     value = cfg.train.smoke_max_steps if smoke else cfg.train.max_steps
     return None if value is None else int(value)
+
+
+def training_seed(cfg: DictConfig, shadow_index: int | None) -> int:
+    if shadow_index is None:
+        return int(cfg.runtime.seed)
+    return int(cfg.runtime.seed) + int(cfg.shadow.seed_offset) + shadow_index
+
+
+def _resolved_config(cfg: DictConfig) -> dict[str, Any]:
+    resolved = OmegaConf.to_container(cfg, resolve=True)
+    if not isinstance(resolved, dict):
+        raise TypeError("Resolved Hydra config must be a mapping.")
+    return resolved
+
+
+def _training_run_is_complete(
+    cfg: DictConfig,
+    run_dir: Path,
+    strategy: FineTuningStrategy,
+) -> bool:
+    config_sha256 = config_fingerprint(_resolved_config(cfg))
+    checkpoint_path = run_dir / strategy.checkpoint_dirname
+    required_files = (
+        run_dir / "train_manifest.jsonl",
+        run_dir / "metrics.json",
+        run_dir / str(cfg.report.resolved_config_filename),
+        run_dir / str(cfg.report.experiment_filename),
+    )
+    if strategy.name == "full":
+        required_files = (*required_files, run_dir / "run_manifest.json")
+    return strategy.checkpoint_is_complete(
+        checkpoint_path, config_sha256=config_sha256
+    ) and all(path.is_file() for path in required_files)
+
+
+def _resume_checkpoint(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    trainer_dir: Path,
+) -> str | None:
+    if bool(cfg.workflow.force):
+        _remove_temporary_checkpoints(trainer_dir)
+        return None
+    value = OmegaConf.select(cfg, "checkpoint.resume_from_checkpoint")
+    if value is None or value is False or str(value).lower() in {"none", "false"}:
+        return None
+    if str(value).lower() == "auto":
+        checkpoints: list[tuple[int, Path]] = []
+        for path in trainer_dir.glob("checkpoint-*"):
+            try:
+                step = int(path.name.rsplit("-", maxsplit=1)[1])
+            except (IndexError, ValueError):
+                continue
+            if path.is_dir():
+                checkpoints.append((step, path))
+        return None if not checkpoints else str(max(checkpoints)[1])
+    checkpoint = Path(str(value))
+    if not checkpoint.is_absolute():
+        checkpoint = project_root / checkpoint
+    if not checkpoint.is_dir():
+        raise FileNotFoundError(f"Resume checkpoint does not exist: {checkpoint}")
+    return str(checkpoint)
+
+
+def _latest_logged_metric(trainer: Any, name: str) -> float | None:
+    for row in reversed(trainer.state.log_history):
+        value = row.get(name)
+        if _is_number(value):
+            return float(value)
+    return None
+
+
+def _remove_temporary_checkpoints(trainer_dir: Path) -> None:
+    for path in trainer_dir.glob("checkpoint-*"):
+        if path.is_dir():
+            shutil.rmtree(path)
+
+
+def _write_training_run_manifest(
+    cfg: DictConfig,
+    run_dir: Path,
+    checkpoint_path: Path,
+    *,
+    config_sha256: str,
+    role: str,
+    model_seed: int,
+) -> None:
+    files = (
+        run_dir / "train_manifest.jsonl",
+        run_dir / "metrics.json",
+        run_dir / str(cfg.report.resolved_config_filename),
+        run_dir / str(cfg.report.experiment_filename),
+        run_dir / "trainer" / "trainer_state.json",
+        checkpoint_path / "manifest.json",
+        checkpoint_path / "_SUCCESS",
+    )
+    missing = [path for path in files if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Training run manifest inputs are missing: {missing}")
+    write_json(
+        run_dir / "run_manifest.json",
+        {
+            "config_sha256": config_sha256,
+            "role": role,
+            "model_seed": model_seed,
+            "file_sha256": {
+                path.relative_to(run_dir).as_posix(): file_sha256(path)
+                for path in files
+            },
+        },
+    )
 
 
 def train_target(
@@ -379,12 +703,13 @@ def train_target(
         / "target"
         / f"seed_{int(cfg.runtime.seed)}"
     )
-    adapter_dir = run_dir / "adapter"
-    if adapter_dir.joinpath("adapter_config.json").exists() and not bool(
+    strategy = fine_tuning_strategy(cfg)
+    checkpoint_path = run_dir / strategy.checkpoint_dirname
+    if _training_run_is_complete(cfg, run_dir, strategy) and not bool(
         cfg.workflow.force
     ):
-        LOGGER.info("Reusing existing target adapter: %s", adapter_dir)
-        return adapter_dir
+        LOGGER.info("Reusing existing target checkpoint: %s", checkpoint_path)
+        return checkpoint_path
     records = load_split_file(cfg, project_root, "squad_target_train")
     if smoke:
         records = deterministic_subset(
@@ -393,7 +718,7 @@ def train_target(
             limit=max(8, candidate_limit(cfg, smoke)),
             namespace="smoke_target_train",
         )
-    return train_lora(
+    return train_model(
         cfg,
         project_root=project_root,
         train_records=records,
@@ -402,6 +727,7 @@ def train_target(
         shadow_index=None,
         command=command,
         max_steps_value=max_steps(cfg, smoke),
+        model_seed=training_seed(cfg, None),
     )
 
 
@@ -414,9 +740,32 @@ def train_shadows(
 ) -> list[Path]:
     build_candidate_set(cfg, project_root=project_root, smoke=smoke)
     candidates = read_jsonl(candidate_paths(cfg, project_root, smoke=smoke)["public"])
-    masks = read_shadow_masks(candidate_paths(cfg, project_root, smoke=smoke)["masks"])
-    auxiliary_pool = load_split_file(cfg, project_root, "squad_attacker_auxiliary_pool")
-    adapters: list[Path] = []
+    masks = read_shadow_masks(
+        candidate_paths(cfg, project_root, smoke=smoke)["masks"],
+        require_in_out=not smoke,
+    )
+    tokenizer = load_tokenizer(
+        str(cfg.model.name_or_path),
+        revision=str(cfg.model.revision),
+        trust_remote_code=bool(cfg.tokenizer.trust_remote_code),
+    )
+    auxiliary_pool = materialize_records(
+        load_split_file(cfg, project_root, "squad_attacker_auxiliary_pool"),
+        tokenizer,
+        int(cfg.tokenizer.max_length),
+        num_workers=int(cfg.tokenizer.preprocessing_workers),
+    )
+    target_manifest_path = (
+        model_root(cfg, project_root, smoke=smoke)
+        / "target"
+        / f"seed_{int(cfg.runtime.seed)}"
+        / "train_manifest.jsonl"
+    )
+    target_train_hashes = {
+        record_from_json(row).content_sha256 for row in read_jsonl(target_manifest_path)
+    }
+    checkpoints: list[Path] = []
+    strategy = fine_tuning_strategy(cfg)
     for index in range(shadow_count(cfg, smoke)):
         included = [
             record_from_public_candidate(row)
@@ -437,7 +786,7 @@ def train_shadows(
             seed=int(cfg.runtime.seed) + int(cfg.shadow.seed_offset) + index,
             limit=target_size - len(included),
             namespace=f"shadow_{index:02d}_fill",
-            excluded_content_hashes={row.content_sha256 for row in included},
+            excluded_content_hashes=target_train_hashes,
         )
         records = included + fill
         content_hashes = [record.content_sha256 for record in records]
@@ -445,19 +794,22 @@ def train_shadows(
             raise ValueError(f"Shadow {index} could not reach {target_size} rows.")
         if len(set(content_hashes)) != len(content_hashes):
             raise ValueError(f"Shadow {index} contains duplicate record content.")
+        if {record.content_sha256 for record in fill} & target_train_hashes:
+            raise ValueError(f"Shadow {index} filler overlaps target-training content.")
 
         run_dir = (
             model_root(cfg, project_root, smoke=smoke)
             / "shadows"
             / f"shadow_{index:02d}"
         )
-        adapter_dir = run_dir / "adapter"
-        if adapter_dir.joinpath("adapter_config.json").exists() and not bool(
+        checkpoint_path = run_dir / strategy.checkpoint_dirname
+        if _training_run_is_complete(cfg, run_dir, strategy) and not bool(
             cfg.workflow.force
         ):
-            LOGGER.info("Reusing existing shadow adapter: %s", adapter_dir)
-            adapters.append(adapter_dir)
+            LOGGER.info("Reusing existing shadow checkpoint: %s", checkpoint_path)
+            checkpoints.append(checkpoint_path)
             continue
+        run_dir.mkdir(parents=True, exist_ok=True)
         write_jsonl(
             run_dir / "train_manifest.jsonl", (record_to_json(row) for row in records)
         )
@@ -467,11 +819,12 @@ def train_shadows(
                 "shadow_index": index,
                 "included_candidates": len(included),
                 "filled_from_auxiliary_pool": len(fill),
+                "forbidden_target_overlap": 0,
                 "train_size": len(records),
             },
         )
-        adapters.append(
-            train_lora(
+        checkpoints.append(
+            train_model(
                 cfg,
                 project_root=project_root,
                 train_records=records,
@@ -480,12 +833,13 @@ def train_shadows(
                 shadow_index=index,
                 command=command,
                 max_steps_value=max_steps(cfg, smoke),
+                model_seed=training_seed(cfg, index),
             )
         )
-    return adapters
+    return checkpoints
 
 
-def train_lora(
+def train_model(
     cfg: DictConfig,
     *,
     project_root: Path,
@@ -495,12 +849,24 @@ def train_lora(
     shadow_index: int | None,
     command: str,
     max_steps_value: int | None,
+    model_seed: int,
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
+    strategy = fine_tuning_strategy(cfg)
+    resolved_config = _resolved_config(cfg)
+    config_sha256 = config_fingerprint(resolved_config)
+    checkpoint_path = run_dir / strategy.checkpoint_dirname
+    if checkpoint_path.exists():
+        if not bool(cfg.workflow.force):
+            raise ValueError(
+                f"Existing training output is incomplete: {checkpoint_path}"
+            )
+        shutil.rmtree(checkpoint_path)
     write_yaml(
         run_dir / str(cfg.report.resolved_config_filename),
-        OmegaConf.to_container(cfg, resolve=True),
+        resolved_config,
     )
+    seed_everything(model_seed, deterministic=bool(cfg.runtime.deterministic))
     tokenizer = load_tokenizer(
         str(cfg.model.name_or_path),
         revision=str(cfg.model.revision),
@@ -522,67 +888,103 @@ def train_lora(
         trust_remote_code=bool(cfg.tokenizer.trust_remote_code),
     )
     ensure_token_embeddings(model, tokenizer)
-    model = attach_lora(model, cfg)
-    model.print_trainable_parameters()
+    model = strategy.prepare_model(model, cfg)
+    trainable_parameters, total_parameters = strategy.validate_trainable(model)
+    trainer_dir = run_dir / "trainer"
     trainer = make_trainer(
         model=model,
         tokenizer=tokenizer,
         train_records=train_records,
         cfg=cfg,
-        output_dir=str(run_dir / "trainer"),
+        output_dir=str(trainer_dir),
         max_steps=max_steps_value,
+        seed=model_seed,
     )
-    result = trainer.train()
-    adapter_dir = run_dir / "adapter"
-    adapter_dir.mkdir(parents=True, exist_ok=True)
-    trainer.model.save_pretrained(adapter_dir)
-    tokenizer.save_pretrained(adapter_dir)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    resume_from_checkpoint = _resume_checkpoint(
+        cfg, project_root=project_root, trainer_dir=trainer_dir
+    )
+    result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    trainer.save_state()
+    strategy.validate_trainable(trainer.model)
+    checkpoint_path = strategy.save_final(
+        trainer.model,
+        tokenizer,
+        run_dir,
+        config_sha256=config_sha256,
+    )
     metrics = {
         f"train/{key}": float(value)
         for key, value in result.metrics.items()
         if _is_number(value)
     }
     metrics["train/records"] = float(len(train_records))
-    metrics["train/trainable_parameters"] = float(
-        _trainable_parameter_count(trainer.model)
-    )
+    metrics["train/model_seed"] = float(model_seed)
+    metrics["train/trainable_parameters"] = float(trainable_parameters)
+    metrics["train/total_parameters"] = float(total_parameters)
+    if torch.cuda.is_available():
+        metrics["train/peak_gpu_memory_bytes"] = float(
+            torch.cuda.max_memory_allocated()
+        )
+    for metric_name in ("learning_rate", "grad_norm"):
+        value = _latest_logged_metric(trainer, metric_name)
+        if value is not None:
+            metrics[f"train/final_{metric_name}"] = value
     write_json(run_dir / "metrics.json", metrics)
     stage_name = role if shadow_index is None else f"shadow_{shadow_index:02d}"
+    checkpoint_artifact = {strategy.artifact_name: checkpoint_path}
     tracking_artifacts = _log_wandb_stage(
         stage=stage_name,
         metrics=metrics,
         paths={
-            "adapter": adapter_dir,
+            **({} if strategy.name == "full" else checkpoint_artifact),
             "metrics": run_dir / "metrics.json",
             "resolved_config": run_dir / str(cfg.report.resolved_config_filename),
         },
+        reference_paths=(checkpoint_artifact if strategy.name == "full" else None),
     )
+    if strategy.name == "full":
+        _remove_temporary_checkpoints(trainer_dir)
     write_experiment_markdown(
         run_dir / str(cfg.report.experiment_filename),
-        purpose=f"{role} LoRA fine-tuning for {cfg.model.display_name} on SQuAD QA.",
+        purpose=(
+            f"{role} {strategy.report_label} fine-tuning for "
+            f"{cfg.model.display_name} on SQuAD QA."
+        ),
         hypothesis=str(cfg.experiment.hypothesis),
         command=command,
         overrides=[],
-        config_fingerprint_value=config_fingerprint(
-            OmegaConf.to_container(cfg, resolve=True)
-        ),
+        config_fingerprint_value=config_sha256,
         git_state=collect_git_state(project_root),
         environment=extended_environment(project_root),
         artifacts={
-            "adapter": str(adapter_dir),
+            strategy.artifact_name: str(checkpoint_path),
             "metrics": str(run_dir / "metrics.json"),
             "resolved_config": str(run_dir / str(cfg.report.resolved_config_filename)),
             **tracking_artifacts,
         },
         metrics=metrics,
-        conclusion=f"{role} LoRA adapter saved from the final epoch/step.",
+        conclusion=(
+            f"{role} {strategy.report_label} checkpoint saved from the final "
+            "epoch/step without checkpoint selection."
+        ),
         achieved_purpose=True,
-        next_action="Evaluate utility or score candidates with this final adapter.",
+        next_action="Evaluate utility or score candidates with this final checkpoint.",
         wandb_run_id=_active_wandb_run_id(),
     )
+    if strategy.name == "full":
+        _write_training_run_manifest(
+            cfg,
+            run_dir,
+            checkpoint_path,
+            config_sha256=config_sha256,
+            role=role,
+            model_seed=model_seed,
+        )
     del trainer, model
     cleanup_cuda()
-    return adapter_dir
+    return checkpoint_path
 
 
 def evaluate_all(
@@ -592,13 +994,14 @@ def evaluate_all(
     command: str,
     smoke: bool,
 ) -> None:
-    target_adapter = train_target(
+    strategy = fine_tuning_strategy(cfg)
+    target_checkpoint = train_target(
         cfg, project_root=project_root, command=command, smoke=smoke
     )
     evaluate_model(
         cfg,
         project_root=project_root,
-        adapter_path=None,
+        checkpoint_path=None,
         run_name="base",
         command=command,
         smoke=smoke,
@@ -606,8 +1009,8 @@ def evaluate_all(
     evaluate_model(
         cfg,
         project_root=project_root,
-        adapter_path=target_adapter,
-        run_name="target_lora",
+        checkpoint_path=target_checkpoint,
+        run_name=strategy.target_eval_name,
         command=command,
         smoke=smoke,
     )
@@ -617,7 +1020,7 @@ def evaluate_model(
     cfg: DictConfig,
     *,
     project_root: Path,
-    adapter_path: Path | None,
+    checkpoint_path: Path | None,
     run_name: str,
     command: str,
     smoke: bool,
@@ -640,10 +1043,8 @@ def evaluate_model(
         limit=limit,
         namespace="eval_trivia_validation",
     )
-    model, tokenizer = load_model_for_inference(
-        cfg,
-        adapter_path=str(adapter_path) if adapter_path is not None else None,
-    )
+    strategy = fine_tuning_strategy(cfg)
+    model, tokenizer = strategy.load_for_inference(cfg, checkpoint_path)
     metrics: dict[str, float] = {}
     for name, records in [
         ("squad_validation", squad_validation),
@@ -683,7 +1084,10 @@ def evaluate_model(
     write_experiment_markdown(
         run_dir / str(cfg.report.experiment_filename),
         purpose=f"Evaluate {run_name} {cfg.model.display_name} on SQuAD IID and TriviaQA OOD QA.",
-        hypothesis="Final LoRA should reduce completion loss and improve QA EM/F1 versus the base model.",
+        hypothesis=(
+            f"Final {strategy.report_label} fine-tuning should reduce completion "
+            "loss and improve QA EM/F1 versus the base model."
+        ),
         command=command,
         overrides=[],
         config_fingerprint_value=config_fingerprint(
@@ -693,13 +1097,13 @@ def evaluate_model(
         environment=extended_environment(project_root),
         artifacts={
             "metrics": str(metrics_path),
-            "adapter": str(adapter_path or "base-model"),
+            "checkpoint": str(checkpoint_path or "base-model"),
             **tracking_artifacts,
         },
         metrics=metrics,
         conclusion="Evaluation completed without checkpoint selection.",
         achieved_purpose=True,
-        next_action="Use final target adapter for generated candidates and RMIA scoring.",
+        next_action="Use the final target checkpoint for generation and RMIA scoring.",
         wandb_run_id=_active_wandb_run_id(),
     )
     del model
@@ -777,7 +1181,8 @@ def generate_target_candidates(
     command: str,
     smoke: bool,
 ) -> None:
-    target_adapter = train_target(
+    strategy = fine_tuning_strategy(cfg)
+    target_checkpoint = train_target(
         cfg, project_root=project_root, command=command, smoke=smoke
     )
     _generate_candidates(
@@ -785,9 +1190,10 @@ def generate_target_candidates(
         project_root=project_root,
         command=command,
         smoke=smoke,
-        adapter_path=target_adapter,
+        checkpoint_path=target_checkpoint,
+        group_prefix=strategy.generated_group_prefix,
         run_dir=model_root(cfg, project_root, smoke=smoke) / "generated",
-        model_run_id=str(target_adapter),
+        model_run_id=str(target_checkpoint),
         wandb_stage="generated",
         purpose=(
             "Generate reusable target-model candidate completions for "
@@ -812,13 +1218,24 @@ def generate_base_candidates(
     smoke: bool,
 ) -> None:
     prepare_data(cfg, project_root)
+    reuse_manifest = prepare_reuse_manifest(cfg, project_root=project_root, smoke=smoke)
+    if (
+        reuse_manifest is not None
+        and reuse_manifest["base_generation"]["status"] == "reused"
+    ):
+        LOGGER.info(
+            "Reusing validated base generation: %s",
+            reuse_manifest["base_generation"]["path"],
+        )
+        return
     model_id = f"{cfg.model.name_or_path}@{cfg.model.revision}"
     _generate_candidates(
         cfg,
         project_root=project_root,
         command=command,
         smoke=smoke,
-        adapter_path=None,
+        checkpoint_path=None,
+        group_prefix="gen",
         run_dir=model_root(cfg, project_root, smoke=smoke) / "generated" / "base",
         model_run_id=model_id,
         wandb_stage="generated_base",
@@ -831,7 +1248,7 @@ def generate_base_candidates(
             "a reproducible pre-LoRA reference for generated-data comparisons."
         ),
         conclusion="Base-model generations and source provenance were saved for reuse.",
-        next_action="Compare base and target-LoRA generation metrics and distributions.",
+        next_action="Compare base and fine-tuned generation metrics and distributions.",
     )
 
 
@@ -841,7 +1258,8 @@ def _generate_candidates(
     project_root: Path,
     command: str,
     smoke: bool,
-    adapter_path: Path | None,
+    checkpoint_path: Path | None,
+    group_prefix: str,
     run_dir: Path,
     model_run_id: str,
     wandb_stage: str,
@@ -873,24 +1291,27 @@ def _generate_candidates(
         limit=limit,
         namespace="gen_from_trivia_validation",
     )
-    model, tokenizer = load_model_for_inference(
-        cfg,
-        adapter_path=str(adapter_path) if adapter_path is not None else None,
-    )
+    strategy = fine_tuning_strategy(cfg)
+    model, tokenizer = strategy.load_for_inference(cfg, checkpoint_path)
+    group_names = {
+        "squad_train": f"{group_prefix}_from_squad_train",
+        "squad_validation": f"{group_prefix}_from_squad_validation",
+        "trivia_validation": f"{group_prefix}_from_trivia_validation",
+    }
     groups = {
-        "gen_from_squad_train": materialize_records(
+        group_names["squad_train"]: materialize_records(
             target_train,
             tokenizer,
             int(cfg.tokenizer.max_length),
             num_workers=int(cfg.tokenizer.preprocessing_workers),
         ),
-        "gen_from_squad_validation": materialize_records(
+        group_names["squad_validation"]: materialize_records(
             squad_validation,
             tokenizer,
             int(cfg.tokenizer.max_length),
             num_workers=int(cfg.tokenizer.preprocessing_workers),
         ),
-        "gen_from_trivia_validation": materialize_records(
+        group_names["trivia_validation"]: materialize_records(
             trivia_validation,
             tokenizer,
             int(cfg.tokenizer.max_length),
@@ -957,7 +1378,7 @@ def _generate_candidates(
                     "private_group": group_name,
                     "source_id": source.record_id,
                     "source_prompt_membership": int(
-                        group_name == "gen_from_squad_train"
+                        group_name == group_names["squad_train"]
                     ),
                     "exact_reconstruction": is_exact_member,
                     "record_membership_label": is_exact_member,
@@ -1033,7 +1454,7 @@ def _generate_candidates(
     }
     manifest["generation_source"] = {
         "model": model_run_id,
-        "adapter": None if adapter_path is None else str(adapter_path),
+        "checkpoint": (None if checkpoint_path is None else str(checkpoint_path)),
     }
     write_json(manifest_path, manifest)
     tracking_artifacts = _log_wandb_stage(
@@ -1061,7 +1482,7 @@ def _generate_candidates(
         artifacts={
             **{name: str(path) for name, path in manifest["files"].items()},
             "model": model_run_id,
-            "adapter": str(adapter_path or "base-model"),
+            "checkpoint": str(checkpoint_path or "base-model"),
             **tracking_artifacts,
         },
         metrics=metrics,
@@ -1080,7 +1501,9 @@ def candidate_paths(
     root = model_root(cfg, project_root, smoke=smoke) / "candidates"
     return {
         "public": root / "public_candidates.jsonl",
-        "private": root / "private_labels.jsonl",
+        "private": root / "evaluator_mapping.jsonl",
+        "raw_public": root / "raw_public_candidates.jsonl",
+        "raw_private": root / "raw_private_provenance.jsonl",
         "masks": root / "shadow_masks.csv",
         "manifest": root / "manifest.json",
     }
@@ -1089,15 +1512,25 @@ def candidate_paths(
 def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> None:
     paths = candidate_paths(cfg, project_root, smoke=smoke)
     if paths["manifest"].exists() and not bool(cfg.workflow.force):
-        existing_public = read_jsonl(paths["public"])
-        existing_private = read_jsonl(paths["private"])
-        unique_public, _ = deduplicate_candidate_rows(existing_public, existing_private)
-        if len(unique_public) == len(existing_public):
+        required = ("public", "private", "raw_public", "raw_private", "masks")
+        if all(paths[name].is_file() for name in required):
+            existing_public = read_jsonl(paths["public"])
+            existing_mapping = read_jsonl(paths["private"])
+            public_ids = {str(row["candidate_id"]) for row in existing_public}
+            mapping_ids = {str(row["candidate_id"]) for row in existing_mapping}
+        else:
+            public_ids = set()
+            mapping_ids = set()
+        if (
+            public_ids
+            and public_ids == mapping_ids
+            and len(public_ids) == len(existing_public)
+        ):
             LOGGER.info("Reusing candidate set: %s", paths["manifest"])
             return
-        LOGGER.warning(
-            "Rebuilding candidate set because %d duplicate content rows were found.",
-            len(existing_public) - len(unique_public),
+        raise ValueError(
+            "Existing candidate manifest is incomplete or invalid. Use "
+            "workflow.force=true to rebuild it."
         )
     generate_target_candidates(
         cfg,
@@ -1144,51 +1577,80 @@ def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> 
         int(cfg.tokenizer.max_length),
         num_workers=int(cfg.tokenizer.preprocessing_workers),
     )
-    public_rows: list[dict[str, Any]] = []
-    private_rows: list[dict[str, Any]] = []
-    for group_name, rows, member in [
-        ("gold_squad_target_train", target_train, 1),
-        ("gold_squad_validation", squad_validation, 0),
-        ("gold_trivia_validation", trivia_validation, 0),
+    target_manifest_path = (
+        model_root(cfg, project_root, smoke=smoke)
+        / "target"
+        / f"seed_{int(cfg.runtime.seed)}"
+        / "train_manifest.jsonl"
+    )
+    target_train_hashes = {
+        record_from_json(row).content_sha256 for row in read_jsonl(target_manifest_path)
+    }
+    raw_public_rows: list[dict[str, Any]] = []
+    raw_private_rows: list[dict[str, Any]] = []
+    for group_name, rows in [
+        ("gold_squad_target_train", target_train),
+        ("gold_squad_validation", squad_validation),
+        ("gold_trivia_validation", trivia_validation),
     ]:
         for record in rows:
             cid = candidate_id(f"cand_{group_name}", record)
-            public_rows.append(public_candidate(record, cid))
-            private_rows.append(
+            member = int(record.content_sha256 in target_train_hashes)
+            raw_public_rows.append(public_candidate(record, cid))
+            raw_private_rows.append(
                 {
                     "candidate_id": cid,
                     "private_group": group_name,
                     "source_id": record.record_id,
-                    "source_prompt_membership": int(member),
-                    "exact_reconstruction": int(member),
-                    "record_membership_label": int(member),
+                    "source_prompt_membership": member,
+                    "exact_reconstruction": member,
+                    "record_membership_label": member,
                 }
             )
     generated_dir = model_root(cfg, project_root, smoke=smoke) / "generated"
-    public_rows.extend(read_jsonl(generated_dir / "public_generated.jsonl"))
-    private_rows.extend(read_jsonl(generated_dir / "private_generated_labels.jsonl"))
-    raw_candidate_count = len(public_rows)
-    public_rows, private_rows = deduplicate_candidate_rows(public_rows, private_rows)
+    raw_public_rows.extend(read_jsonl(generated_dir / "public_generated.jsonl"))
+    raw_private_rows.extend(
+        read_jsonl(generated_dir / "private_generated_labels.jsonl")
+    )
+    write_jsonl(paths["raw_public"], raw_public_rows)
+    write_jsonl(paths["raw_private"], raw_private_rows)
+    public_rows, private_rows = canonicalize_candidate_rows(
+        raw_public_rows, raw_private_rows
+    )
     write_jsonl(paths["public"], public_rows)
     write_jsonl(paths["private"], private_rows)
-    write_shadow_masks(
-        paths["masks"],
-        [row["candidate_id"] for row in public_rows],
-        seed=int(cfg.runtime.seed) + int(cfg.shadow.seed_offset),
-        shadow_count=shadow_count(cfg, smoke),
-        inclusion_probability=float(cfg.shadow.inclusion_probability),
-    )
+    candidate_ids = [row["candidate_id"] for row in public_rows]
+    mask_seed = int(cfg.runtime.seed) + int(cfg.shadow.seed_offset)
+    if smoke:
+        write_single_shadow_smoke_mask(
+            paths["masks"],
+            candidate_ids,
+            seed=mask_seed,
+            max_included=candidate_limit(cfg, smoke),
+        )
+    else:
+        write_shadow_masks(
+            paths["masks"],
+            candidate_ids,
+            seed=mask_seed,
+            shadow_count=shadow_count(cfg, smoke=False),
+            inclusion_probability=float(cfg.shadow.inclusion_probability),
+        )
     manifest = artifact_manifest(
         cfg,
         project_root,
         {
+            "raw_public_candidates": paths["raw_public"],
+            "raw_private_provenance": paths["raw_private"],
             "public_candidates": paths["public"],
-            "private_labels": paths["private"],
+            "evaluator_mapping": paths["private"],
             "shadow_masks": paths["masks"],
         },
         row_counts={
+            "raw_public_candidates": len(raw_public_rows),
+            "raw_private_provenance": len(raw_private_rows),
             "public_candidates": len(public_rows),
-            "private_labels": len(private_rows),
+            "evaluator_mapping": len(private_rows),
             "shadow_models": shadow_count(cfg, smoke),
         },
     )
@@ -1196,8 +1658,9 @@ def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> 
     _log_wandb_stage(
         stage="candidates",
         metrics={
+            "raw_candidates": float(len(raw_public_rows)),
             "public_candidates": float(len(public_rows)),
-            "deduplicated_candidates": float(raw_candidate_count - len(public_rows)),
+            "deduplicated_candidates": float(len(raw_public_rows) - len(public_rows)),
         },
         paths={**paths},
     )
@@ -1221,31 +1684,21 @@ def run_attack(
     public_rows = read_jsonl(paths["public"])
     candidates = [record_from_public_candidate(row) for row in public_rows]
     masks = read_shadow_masks(paths["masks"])
-    target_adapter = (
-        model_root(cfg, project_root, smoke=smoke)
-        / "target"
-        / f"seed_{int(cfg.runtime.seed)}"
-        / "adapter"
-    )
-    target_scores = score_with_adapter(
+    target_checkpoint = target_checkpoint_path(cfg, project_root, smoke=smoke)
+    target_scores = score_with_checkpoint(
         cfg,
         candidates,
-        adapter_path=target_adapter,
+        checkpoint_path=target_checkpoint,
         batch_size=int(cfg.attack.batch_size),
     )
     shadow_scores = []
-    for index in range(shadow_count(cfg, smoke)):
-        adapter = (
-            model_root(cfg, project_root, smoke=smoke)
-            / "shadows"
-            / f"shadow_{index:02d}"
-            / "adapter"
-        )
+    shadow_checkpoints = shadow_checkpoint_paths(cfg, project_root, smoke=smoke)
+    for checkpoint in shadow_checkpoints:
         shadow_scores.append(
-            score_with_adapter(
+            score_with_checkpoint(
                 cfg,
                 candidates,
-                adapter_path=adapter,
+                checkpoint_path=checkpoint,
                 batch_size=int(cfg.attack.batch_size),
             )
         )
@@ -1264,25 +1717,19 @@ def run_attack(
             limit=candidate_limit(cfg, smoke),
             namespace="smoke_population",
         )
-    population_target = score_with_adapter(
+    population_target = score_with_checkpoint(
         cfg,
         population,
-        adapter_path=target_adapter,
+        checkpoint_path=target_checkpoint,
         batch_size=int(cfg.attack.batch_size),
     )
     population_shadows = []
-    for index in range(shadow_count(cfg, smoke)):
-        adapter = (
-            model_root(cfg, project_root, smoke=smoke)
-            / "shadows"
-            / f"shadow_{index:02d}"
-            / "adapter"
-        )
+    for checkpoint in shadow_checkpoints:
         population_shadows.append(
-            score_with_adapter(
+            score_with_checkpoint(
                 cfg,
                 population,
-                adapter_path=adapter,
+                checkpoint_path=checkpoint,
                 batch_size=int(cfg.attack.batch_size),
             )
         )
@@ -1379,6 +1826,7 @@ def run_attack(
             "scores": str(scores_path),
             "metrics": str(metrics_path),
             "public_candidates": str(paths["public"]),
+            "evaluator_mapping": str(paths["private"]),
             "shadow_masks": str(paths["masks"]),
             **tracking_artifacts,
         },
@@ -1392,18 +1840,22 @@ def run_attack(
 
 def _analysis_candidate_rows(
     root: Path,
+    *,
+    base_generation_root: Path,
+    generated_variant: str,
+    generated_group_prefix: str,
 ) -> tuple[
     list[dict[str, object]],
     list[dict[str, object]],
     dict[str, Path],
 ]:
     source_files = {
-        "lora_and_gold_public": root / "candidates" / "public_candidates.jsonl",
-        "lora_and_gold_private": root / "candidates" / "private_labels.jsonl",
-        "base_public": root / "generated" / "base" / "public_generated.jsonl",
-        "base_private": (
-            root / "generated" / "base" / "private_generated_labels.jsonl"
+        "fine_tuned_and_gold_public": (root / "candidates" / "public_candidates.jsonl"),
+        "fine_tuned_and_gold_private": (
+            root / "candidates" / "evaluator_mapping.jsonl"
         ),
+        "base_public": base_generation_root / "public_generated.jsonl",
+        "base_private": base_generation_root / "private_generated_labels.jsonl",
     }
     for source_path in source_files.values():
         if not source_path.is_file():
@@ -1413,15 +1865,21 @@ def _analysis_candidate_rows(
 
     source_specs = (
         (
-            source_files["lora_and_gold_public"],
-            source_files["lora_and_gold_private"],
+            source_files["fine_tuned_and_gold_public"],
+            source_files["fine_tuned_and_gold_private"],
             {
                 "gold_squad_target_train": "gold_squad_target_train",
                 "gold_squad_validation": "gold_squad_validation",
                 "gold_trivia_validation": "gold_trivia_validation",
-                "gen_from_squad_train": "lora_gen_from_squad_train",
-                "gen_from_squad_validation": "lora_gen_from_squad_validation",
-                "gen_from_trivia_validation": "lora_gen_from_trivia_validation",
+                f"{generated_group_prefix}_from_squad_train": (
+                    f"{generated_variant}_gen_from_squad_train"
+                ),
+                f"{generated_group_prefix}_from_squad_validation": (
+                    f"{generated_variant}_gen_from_squad_validation"
+                ),
+                f"{generated_group_prefix}_from_trivia_validation": (
+                    f"{generated_variant}_gen_from_trivia_validation"
+                ),
             },
         ),
         (
@@ -1485,8 +1943,15 @@ def plot_rmia_feature_distribution(
             "The formal RMIA feature plot requires relative_log_likelihood."
         )
 
+    strategy = fine_tuning_strategy(cfg)
+    group_order = candidate_groups_for_variant(strategy.generated_variant)
     root = model_root(cfg, project_root, smoke=False)
-    public_rows, private_rows, source_files = _analysis_candidate_rows(root)
+    public_rows, private_rows, source_files = _analysis_candidate_rows(
+        root,
+        base_generation_root=base_generation_dir(cfg, project_root, smoke=False),
+        generated_variant=strategy.generated_variant,
+        generated_group_prefix=strategy.generated_group_prefix,
+    )
     sample_size = int(cfg.analysis.sample_size_per_group)
     sampling_seed = int(cfg.analysis.sampling_seed)
     sampled_public, sampled_private = sample_group_candidates(
@@ -1494,14 +1959,12 @@ def plot_rmia_feature_distribution(
         private_rows,
         sample_size=sample_size,
         seed=sampling_seed,
+        group_order=group_order,
     )
     candidates = [record_from_public_candidate(row) for row in sampled_public]
 
-    target_adapter = root / "target" / f"seed_{int(cfg.runtime.seed)}" / "adapter"
-    shadow_adapters = [
-        root / "shadows" / f"shadow_{index:02d}" / "adapter"
-        for index in range(shadow_count(cfg, smoke=False))
-    ]
+    target_checkpoint = target_checkpoint_path(cfg, project_root, smoke=False)
+    shadow_checkpoints = shadow_checkpoint_paths(cfg, project_root, smoke=False)
     output_dir = root / "analysis" / feature
     figure_path = output_dir / "relative_log_likelihood_ecdf.png"
     sampled_path = output_dir / "sampled_candidates.jsonl"
@@ -1509,7 +1972,8 @@ def plot_rmia_feature_distribution(
     resolved_config_path = output_dir / str(cfg.report.resolved_config_filename)
     experiment_path = output_dir / str(cfg.report.experiment_filename)
     feature_definition = (
-        "target_mean_logprob - logmeanexp(mean_logprob from every saved shadow adapter)"
+        "target_mean_logprob - logmeanexp(mean_logprob from every saved shadow "
+        f"{strategy.artifact_name})"
     )
 
     sampled_rows: list[dict[str, object]] | None = None
@@ -1525,11 +1989,11 @@ def plot_rmia_feature_distribution(
         reusable = (
             prior_manifest.get("feature") == feature
             and prior_manifest.get("feature_definition") == feature_definition
-            and prior_manifest.get("group_order") == list(CANDIDATE_GROUPS)
+            and prior_manifest.get("group_order") == list(group_order)
             and prior_manifest.get("sample_size_per_group") == sample_size
-            and prior_manifest.get("reference_shadow_count") == len(shadow_adapters)
+            and prior_manifest.get("reference_shadow_count") == len(shadow_checkpoints)
             and prior_manifest.get("row_counts", {}).get("total")
-            == sample_size * len(CANDIDATE_GROUPS)
+            == sample_size * len(group_order)
             and expected_sample_sha == file_sha256(sampled_path)
         )
         if reusable:
@@ -1537,20 +2001,20 @@ def plot_rmia_feature_distribution(
             LOGGER.info("Reusing formal RMIA feature scores: %s", sampled_path)
 
     if sampled_rows is None:
-        target_scores = score_with_adapter(
+        target_scores = score_with_checkpoint(
             cfg,
             candidates,
-            adapter_path=target_adapter,
+            checkpoint_path=target_checkpoint,
             batch_size=int(cfg.attack.batch_size),
         )
         shadow_scores = [
-            score_with_adapter(
+            score_with_checkpoint(
                 cfg,
                 candidates,
-                adapter_path=adapter,
+                checkpoint_path=checkpoint,
                 batch_size=int(cfg.attack.batch_size),
             )
-            for adapter in shadow_adapters
+            for checkpoint in shadow_checkpoints
         ]
         if len(target_scores) != len(candidates) or any(
             len(scores) != len(candidates) for scores in shadow_scores
@@ -1579,19 +2043,21 @@ def plot_rmia_feature_distribution(
                 }
             )
 
-    expected_rows = sample_size * len(CANDIDATE_GROUPS)
+    expected_rows = sample_size * len(group_order)
     if len(sampled_rows) != expected_rows or any(
         sum(row["private_group"] == group for row in sampled_rows) != sample_size
-        for group in CANDIDATE_GROUPS
+        for group in group_order
     ):
         raise ValueError("Reusable RMIA feature scores have invalid group counts.")
     if any(
-        int(row.get("num_reference_shadows", 0)) != len(shadow_adapters)
+        int(row.get("num_reference_shadows", 0)) != len(shadow_checkpoints)
         or not math.isfinite(float(row[feature]))
         for row in sampled_rows
     ):
         raise ValueError("Reusable RMIA feature scores contain invalid values.")
-    summaries = summarize_group_features(sampled_rows, feature=feature)
+    summaries = summarize_group_features(
+        sampled_rows, feature=feature, group_order=group_order
+    )
     write_jsonl(sampled_path, sampled_rows)
     plot_group_feature_ecdf(
         sampled_rows,
@@ -1599,6 +2065,7 @@ def plot_rmia_feature_distribution(
         model_display_name=str(cfg.model.display_name),
         output_path=figure_path,
         dpi=int(cfg.analysis.figure_dpi),
+        group_order=group_order,
     )
     resolved_config = OmegaConf.to_container(cfg, resolve=True)
     if not isinstance(resolved_config, dict):
@@ -1632,13 +2099,13 @@ def plot_rmia_feature_distribution(
         "feature": feature,
         "feature_definition": feature_definition,
         "model": str(cfg.model.name_or_path),
-        "target_adapter": str(target_adapter),
-        "shadow_adapters": [str(path) for path in shadow_adapters],
-        "reference_shadow_count": len(shadow_adapters),
-        "group_order": list(CANDIDATE_GROUPS),
+        "target_checkpoint": str(target_checkpoint),
+        "shadow_checkpoints": [str(path) for path in shadow_checkpoints],
+        "reference_shadow_count": len(shadow_checkpoints),
+        "group_order": list(group_order),
         "sample_size_per_group": sample_size,
         "row_counts": {
-            **{group: sample_size for group in CANDIDATE_GROUPS},
+            **{group: sample_size for group in group_order},
             "total": len(sampled_rows),
         },
         "source_files": {
@@ -1687,7 +2154,8 @@ def plot_rmia_feature_distribution(
         metrics=metrics,
         conclusion=(
             "The figure is descriptive: color encodes the three data sources, "
-            "line style encodes gold/base-generated/LoRA-generated text, and "
+            f"line style encodes gold/base-generated/{strategy.report_label}-generated "
+            "text, and "
             "every curve uses an equal-size deterministic sample."
         ),
         achieved_purpose=True,
@@ -1698,14 +2166,15 @@ def plot_rmia_feature_distribution(
     )
 
 
-def score_with_adapter(
+def score_with_checkpoint(
     cfg: DictConfig,
     candidates: list[QARecord],
     *,
-    adapter_path: Path,
+    checkpoint_path: Path,
     batch_size: int,
 ) -> list[float]:
-    model, tokenizer = load_model_for_inference(cfg, adapter_path=str(adapter_path))
+    strategy = fine_tuning_strategy(cfg)
+    model, tokenizer = strategy.load_for_inference(cfg, checkpoint_path)
     stats = score_records(
         model,
         tokenizer,
@@ -1733,17 +2202,31 @@ def attack_metrics(
     score_by_id = {
         row["candidate_id"]: float(row["online_rmia_score"]) for row in score_rows
     }
-    labels_by_id = {
-        row["candidate_id"]: int(row["record_membership_label"]) for row in private_rows
-    }
-    groups_by_id = {
-        row["candidate_id"]: str(row["private_group"]) for row in private_rows
-    }
-    positives = [
-        cid
-        for cid, label in labels_by_id.items()
-        if label == 1 and groups_by_id[cid] == "gold_squad_target_train"
-    ]
+    labels_by_id: dict[str, int] = {}
+    candidate_ids_by_group: dict[str, set[str]] = {}
+    for row in private_rows:
+        candidate_id_value = str(row["candidate_id"])
+        if candidate_id_value not in score_by_id:
+            raise ValueError(
+                f"Evaluator mapping references an unscored candidate: "
+                f"{candidate_id_value}"
+            )
+        label = int(row["record_membership_label"])
+        previous_label = labels_by_id.get(candidate_id_value)
+        if previous_label is not None and previous_label != label:
+            raise ValueError("Canonical candidate has conflicting membership labels.")
+        labels_by_id[candidate_id_value] = label
+        group = str(row["private_group"])
+        candidate_ids_by_group.setdefault(group, set()).add(candidate_id_value)
+    if set(score_by_id) != set(labels_by_id):
+        raise ValueError("Scores and evaluator mapping candidate IDs must match.")
+    positives = sorted(
+        candidate_id_value
+        for candidate_id_value in candidate_ids_by_group.get(
+            "gold_squad_target_train", set()
+        )
+        if labels_by_id[candidate_id_value] == 1
+    )
     metrics: dict[str, float] = {
         "population_calibration_examples": float(len(calibration_scores))
     }
@@ -1753,21 +2236,21 @@ def attack_metrics(
         metrics[f"tpr_gold_train_at_population_fpr_{target_fpr}"] = fraction_above(
             [score_by_id[cid] for cid in positives], threshold
         )
-        for group in sorted(set(groups_by_id.values())):
-            negatives = [
-                cid
-                for cid, value in groups_by_id.items()
-                if value == group and labels_by_id[cid] == 0
-            ]
+        for group, group_candidate_ids in sorted(candidate_ids_by_group.items()):
+            negatives = sorted(
+                candidate_id_value
+                for candidate_id_value in group_candidate_ids
+                if labels_by_id[candidate_id_value] == 0
+            )
             metrics[f"fpr_{group}_at_population_fpr_{target_fpr}"] = fraction_above(
                 [score_by_id[cid] for cid in negatives], threshold
             )
-    for group in sorted(set(groups_by_id.values())):
-        negatives = [
-            cid
-            for cid, value in groups_by_id.items()
-            if value == group and labels_by_id[cid] == 0
-        ]
+    for group, group_candidate_ids in sorted(candidate_ids_by_group.items()):
+        negatives = sorted(
+            candidate_id_value
+            for candidate_id_value in group_candidate_ids
+            if labels_by_id[candidate_id_value] == 0
+        )
         if positives and negatives:
             y_true = [1] * len(positives) + [0] * len(negatives)
             values = [score_by_id[cid] for cid in positives + negatives]

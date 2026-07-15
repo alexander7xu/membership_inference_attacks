@@ -316,8 +316,13 @@ def _set_cache(model: Any, enabled: bool) -> None:
 
 
 def training_arguments(
-    output_dir: str, cfg: Any, *, max_steps: int | None
+    output_dir: str,
+    cfg: Any,
+    *,
+    max_steps: int | None,
+    seed: int | None = None,
 ) -> TrainingArguments:
+    training_seed = int(cfg.runtime.seed) if seed is None else int(seed)
     kwargs: dict[str, Any] = {
         "output_dir": output_dir,
         "num_train_epochs": float(cfg.train.epochs),
@@ -329,16 +334,32 @@ def training_arguments(
         "weight_decay": float(cfg.train.weight_decay),
         "bf16": bool(cfg.precision.bf16) and torch.cuda.is_available(),
         "logging_steps": int(cfg.train.logging_steps),
-        "save_strategy": "no",
         "report_to": [],
         "remove_unused_columns": False,
         "dataloader_num_workers": int(_cfg_get(cfg.train, "dataloader_num_workers", 0)),
         "dataloader_pin_memory": bool(
             _cfg_get(cfg.train, "dataloader_pin_memory", True)
         ),
-        "seed": int(cfg.runtime.seed),
-        "data_seed": int(cfg.runtime.seed),
+        "seed": training_seed,
+        "data_seed": training_seed,
+        "gradient_checkpointing": bool(
+            _cfg_get(_cfg_get(cfg, "finetuning", None), "gradient_checkpointing", False)
+        ),
     }
+    checkpoint_cfg = _cfg_get(cfg, "checkpoint", None)
+    save_strategy = str(_cfg_get(checkpoint_cfg, "save_strategy", "no"))
+    if save_strategy == "steps":
+        kwargs.update(
+            {
+                "save_strategy": "steps",
+                "save_steps": int(_cfg_get(checkpoint_cfg, "save_steps", 250)),
+                "save_total_limit": int(
+                    _cfg_get(checkpoint_cfg, "save_total_limit", 1)
+                ),
+            }
+        )
+    else:
+        kwargs["save_strategy"] = "no"
     if int(kwargs["dataloader_num_workers"]) > 0:
         kwargs["dataloader_persistent_workers"] = bool(
             _cfg_get(cfg.train, "dataloader_persistent_workers", True)
@@ -361,6 +382,7 @@ def make_trainer(
     cfg: Any,
     output_dir: str,
     max_steps: int | None,
+    seed: int | None = None,
 ) -> Trainer:
     train_dataset = CompletionOnlyDataset(
         train_records,
@@ -370,7 +392,7 @@ def make_trainer(
     )
     return Trainer(
         model=model,
-        args=training_arguments(output_dir, cfg, max_steps=max_steps),
+        args=training_arguments(output_dir, cfg, max_steps=max_steps, seed=seed),
         train_dataset=train_dataset,
         data_collator=CompletionOnlyCollator(tokenizer),
     )

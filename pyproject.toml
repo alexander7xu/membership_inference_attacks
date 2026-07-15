@@ -60,5 +60,6 @@ indent-style = "space"
 
 [tool.ruff.lint.per-file-ignores]
 "cli/attack_resnet_cifar10.py" = ["E402"]
+"cli/squad_fullft_rmia.py" = ["E402"]
 "cli/squad_lora_rmia.py" = ["E402"]
 "cli/debug_squad_lora_gpu.py" = ["E402"]

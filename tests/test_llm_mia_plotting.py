@@ -5,6 +5,7 @@ import pytest
 
 from src.llm_mia.plotting import (
     CANDIDATE_GROUPS,
+    FULLFT_CANDIDATE_GROUPS,
     GROUP_SOURCE,
     GROUP_VARIANT,
     SOURCE_COLORS,
@@ -44,10 +45,20 @@ def test_group_matrix_has_three_sources_and_three_variants() -> None:
 
     assert len(CANDIDATE_GROUPS) == 9
     assert len(set(GROUP_SOURCE.values())) == 3
-    assert len(set(GROUP_VARIANT.values())) == 3
+    assert len({GROUP_VARIANT[group] for group in CANDIDATE_GROUPS}) == 3
     assert len(combinations) == 9
     assert len(set(SOURCE_COLORS.values())) == 3
     assert len(set(VARIANT_LINESTYLES.values())) == 3
+
+
+def test_fullft_group_matrix_has_three_sources_and_three_variants() -> None:
+    combinations = {
+        (GROUP_SOURCE[group], GROUP_VARIANT[group]) for group in FULLFT_CANDIDATE_GROUPS
+    }
+
+    assert len(FULLFT_CANDIDATE_GROUPS) == 9
+    assert len({GROUP_VARIANT[group] for group in FULLFT_CANDIDATE_GROUPS}) == 3
+    assert len(combinations) == 9
 
 
 def test_group_candidate_sampling_is_deterministic_and_order_independent() -> None:
