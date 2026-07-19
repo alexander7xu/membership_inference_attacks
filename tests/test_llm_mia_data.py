@@ -91,6 +91,24 @@ def test_shadow_masks_are_deterministic_and_have_in_out_models(tmp_path):
     assert all(0 < sum(mask) < 5 for mask in first.values())
 
 
+def test_shadow_masks_support_a_100_model_reference_ensemble(tmp_path):
+    path = tmp_path / "masks.csv"
+    candidate_ids = [f"cand-{idx}" for idx in range(32)]
+
+    write_shadow_masks(
+        path,
+        candidate_ids,
+        seed=1042,
+        shadow_count=100,
+        inclusion_probability=0.5,
+    )
+
+    masks = read_shadow_masks(path)
+    assert set(masks) == set(candidate_ids)
+    assert all(len(mask) == 100 for mask in masks.values())
+    assert all(0 < sum(mask) < 100 for mask in masks.values())
+
+
 def test_single_shadow_smoke_mask_is_deterministic_and_bounded(tmp_path):
     path = tmp_path / "smoke_masks.csv"
     candidate_ids = [f"cand-{idx}" for idx in range(12)]

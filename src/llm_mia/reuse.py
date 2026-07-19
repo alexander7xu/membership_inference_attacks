@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import csv
+import shutil
 from pathlib import Path
 from typing import Any
 
+from omegaconf import OmegaConf
+
+from src.experiment import config_fingerprint
 from src.llm_mia.data import file_sha256, read_json, read_jsonl
 
 
@@ -10,9 +15,399 @@ class ReuseValidationError(ValueError):
     """Raised when a prior experiment artifact cannot be reused safely."""
 
 
+_LORA_TARGET_REUSE_CONFIG_SECTIONS = (
+    "runtime",
+    "model",
+    "data",
+    "tokenizer",
+    "lora",
+    "optimizer",
+    "scheduler",
+    "loss",
+    "precision",
+    "train",
+    "checkpoint",
+)
+_LORA_INFERENCE_REUSE_CONFIG_SECTIONS = (
+    "runtime",
+    "model",
+    "data",
+    "tokenizer",
+    "lora",
+    "precision",
+    "eval",
+    "generation",
+)
+_HISTORICAL_TARGET_IGNORED_CONFIG_KEYS = {
+    "tokenizer": {"preprocessing_workers"},
+}
+
+
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ReuseValidationError(message)
+
+
+def _resolved_yaml(path: Path) -> dict[str, Any]:
+    _require(path.is_file(), f"Missing resolved config: {path}")
+    resolved = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    _require(isinstance(resolved, dict), f"Resolved config is not a mapping: {path}")
+    return resolved
+
+
+def _section_without_ignored_keys(
+    config: dict[str, Any], section: str, ignored_keys: set[str]
+) -> Any:
+    value = config.get(section)
+    if not ignored_keys or not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key not in ignored_keys}
+
+
+def _require_matching_config_sections(
+    source: dict[str, Any],
+    expected: dict[str, Any],
+    sections: tuple[str, ...],
+    *,
+    context: str,
+    ignored_keys: dict[str, set[str]] | None = None,
+) -> None:
+    ignored_keys = ignored_keys or {}
+    for section in sections:
+        ignored = ignored_keys.get(section, set())
+        _require(
+            _section_without_ignored_keys(source, section, ignored)
+            == _section_without_ignored_keys(expected, section, ignored),
+            f"Reusable {context} config mismatch: {section}",
+        )
+
+
+def _tree_hashes(root: Path, *, require_nonempty: bool = True) -> dict[str, str]:
+    _require(root.is_dir(), f"Missing reusable artifact directory: {root}")
+    hashes = {
+        path.relative_to(root).as_posix(): file_sha256(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+    if require_nonempty:
+        _require(bool(hashes), f"Reusable artifact directory is empty: {root}")
+    return hashes
+
+
+def _copy_tree_immutable(
+    source: Path,
+    destination: Path,
+    *,
+    expected_hashes: dict[str, str],
+    force: bool,
+) -> None:
+    if destination.exists():
+        if _tree_hashes(destination, require_nonempty=False) == expected_hashes:
+            return
+        _require(
+            force,
+            f"Existing reused artifact differs from its source: {destination}",
+        )
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, copy_function=shutil.copy2)
+    _require(
+        _tree_hashes(destination) == expected_hashes,
+        f"Copied artifact failed hash verification: {destination}",
+    )
+
+
+def _copy_files_immutable(
+    source: Path,
+    destination: Path,
+    names: tuple[str, ...],
+    *,
+    force: bool,
+) -> dict[str, str]:
+    destination.mkdir(parents=True, exist_ok=True)
+    expected = {}
+    for name in names:
+        source_path = source / name
+        destination_path = destination / name
+        _require(source_path.is_file(), f"Missing reusable artifact: {source_path}")
+        digest = file_sha256(source_path)
+        expected[name] = digest
+        if destination_path.exists() and file_sha256(destination_path) != digest:
+            _require(
+                force,
+                f"Existing reused artifact differs from its source: {destination_path}",
+            )
+            destination_path.unlink()
+        if not destination_path.exists():
+            shutil.copy2(source_path, destination_path)
+        _require(
+            file_sha256(destination_path) == digest,
+            f"Copied artifact failed hash verification: {destination_path}",
+        )
+    return expected
+
+
+def prepare_lora_shadow_expansion_inputs(
+    *,
+    project_root: Path,
+    source_model_root: Path,
+    destination_model_root: Path,
+    expected_config: dict[str, Any],
+    expected_source_shadow_count: int,
+    seed: int,
+    target_eval_name: str,
+    force: bool,
+) -> dict[str, Any]:
+    """Validate and copy immutable non-shadow inputs from a prior LoRA run."""
+    _require(
+        source_model_root.resolve() != destination_model_root.resolve(),
+        "Source and destination model roots must differ.",
+    )
+    source_target = source_model_root / "target" / f"seed_{seed}"
+    source_config_path = source_target / "resolved_config.yaml"
+    source_config = _resolved_yaml(source_config_path)
+    _require_matching_config_sections(
+        source_config,
+        expected_config,
+        _LORA_TARGET_REUSE_CONFIG_SECTIONS,
+        context="LoRA target",
+        ignored_keys=_HISTORICAL_TARGET_IGNORED_CONFIG_KEYS,
+    )
+    _require(
+        source_config.get("paths", {}).get("data_dir")
+        == expected_config.get("paths", {}).get("data_dir"),
+        "Reusable LoRA run data path mismatch.",
+    )
+    source_shadow = dict(source_config.get("shadow", {}))
+    expected_shadow = dict(expected_config.get("shadow", {}))
+    _require(
+        source_shadow.pop("count", None) == expected_source_shadow_count,
+        "Reusable LoRA run has the wrong shadow count.",
+    )
+    expected_shadow.pop("count", None)
+    _require(
+        source_shadow == expected_shadow,
+        "Reusable LoRA run shadow settings differ beyond shadow.count.",
+    )
+
+    target_required = (
+        source_target / "adapter" / "adapter_config.json",
+        source_target / "train_manifest.jsonl",
+        source_target / "metrics.json",
+        source_target / "resolved_config.yaml",
+        source_target / "experiment.md",
+    )
+    _require(
+        all(path.is_file() for path in target_required),
+        f"Reusable target record is incomplete: {source_target}",
+    )
+    _require(
+        any((source_target / "adapter").glob("*.safetensors")),
+        f"Reusable target adapter weights are missing: {source_target / 'adapter'}",
+    )
+
+    source_eval = source_model_root / "eval"
+    for eval_name in ("base", target_eval_name):
+        eval_root = source_eval / eval_name
+        _require(
+            all(
+                (eval_root / name).is_file()
+                for name in ("metrics.json", "resolved_config.yaml", "experiment.md")
+            ),
+            f"Reusable evaluation record is incomplete: {eval_root}",
+        )
+        eval_config = _resolved_yaml(eval_root / "resolved_config.yaml")
+        _require_matching_config_sections(
+            eval_config,
+            expected_config,
+            _LORA_INFERENCE_REUSE_CONFIG_SECTIONS,
+            context=eval_name,
+        )
+
+    source_generated = source_model_root / "generated"
+    generated_files = (
+        "public_generated.jsonl",
+        "private_generated_labels.jsonl",
+        "metrics.json",
+        "manifest.json",
+        "experiment.md",
+    )
+    generated_manifest = read_json(source_generated / "manifest.json")
+    generated_config_path = source_generated / "resolved_config.yaml"
+    if generated_config_path.is_file():
+        generated_config = _resolved_yaml(generated_config_path)
+        generated_files = (*generated_files, "resolved_config.yaml")
+        generated_config_validation = "generated_resolved_config"
+    else:
+        generated_config_path = source_eval / target_eval_name / "resolved_config.yaml"
+        generated_config = _resolved_yaml(generated_config_path)
+        generated_fingerprint = generated_manifest.get("config_sha256")
+        _require(
+            generated_fingerprint == config_fingerprint(generated_config),
+            "Historical generated config fingerprint does not match the "
+            "target evaluation resolved config.",
+        )
+        experiment_text = (source_generated / "experiment.md").read_text(
+            encoding="utf-8"
+        )
+        _require(
+            f"`{generated_fingerprint}`" in experiment_text,
+            "Historical generated experiment record has a different config "
+            "fingerprint.",
+        )
+        generated_config_validation = "target_eval_fingerprint"
+    _require_matching_config_sections(
+        generated_config,
+        expected_config,
+        _LORA_INFERENCE_REUSE_CONFIG_SECTIONS,
+        context="generated",
+    )
+    generated_hashes = generated_manifest.get("file_sha256", {})
+    generated_manifest_names = {
+        "public_generated.jsonl": "public_generated",
+        "private_generated_labels.jsonl": "private_generated_labels",
+        "metrics.json": "metrics",
+    }
+    for name, manifest_name in generated_manifest_names.items():
+        path = source_generated / name
+        _require(path.is_file(), f"Missing reusable generated artifact: {path}")
+        _require(
+            generated_hashes.get(manifest_name) == file_sha256(path),
+            f"Reusable generated artifact hash mismatch: {path}",
+        )
+
+    target_hashes = _tree_hashes(source_model_root / "target")
+    eval_hashes = _tree_hashes(source_eval)
+    _copy_tree_immutable(
+        source_model_root / "target",
+        destination_model_root / "target",
+        expected_hashes=target_hashes,
+        force=force,
+    )
+    _copy_tree_immutable(
+        source_eval,
+        destination_model_root / "eval",
+        expected_hashes=eval_hashes,
+        force=force,
+    )
+    copied_generated_hashes = _copy_files_immutable(
+        source_generated,
+        destination_model_root / "generated",
+        generated_files,
+        force=force,
+    )
+    return {
+        "status": "reused",
+        "source_model_root": str(source_model_root.relative_to(project_root)),
+        "destination_model_root": str(destination_model_root.relative_to(project_root)),
+        "expected_source_shadow_count": expected_source_shadow_count,
+        "destination_shadow_count": int(expected_config["shadow"]["count"]),
+        "validated_config_sections": {
+            "target": list(_LORA_TARGET_REUSE_CONFIG_SECTIONS),
+            "evaluation": list(_LORA_INFERENCE_REUSE_CONFIG_SECTIONS),
+            "generated": list(_LORA_INFERENCE_REUSE_CONFIG_SECTIONS),
+        },
+        "historical_config_compatibility": {
+            "target_ignored_keys": {
+                section: sorted(keys)
+                for section, keys in _HISTORICAL_TARGET_IGNORED_CONFIG_KEYS.items()
+            },
+            "generated_config_validation": generated_config_validation,
+            "generated_config_source": str(
+                generated_config_path.relative_to(project_root)
+            ),
+        },
+        "source_config_sha256": file_sha256(source_config_path),
+        "source_state": generated_manifest.get("source_commit"),
+        "artifact_sha256": {
+            "target": target_hashes,
+            "eval": eval_hashes,
+            "generated": copied_generated_hashes,
+        },
+    }
+
+
+def validate_lora_candidate_artifact(
+    root: Path,
+    *,
+    expected_model: str,
+    expected_tokenizer: str,
+    expected_seed: int,
+    expected_shadow_count: int,
+) -> dict[str, Any]:
+    """Validate the exact candidate tables reused by a shadow expansion."""
+    manifest_path = root / "manifest.json"
+    public_path = root / "public_candidates.jsonl"
+    private_path = root / "private_labels.jsonl"
+    masks_path = root / "shadow_masks.csv"
+    manifest = read_json(manifest_path)
+    _require(manifest.get("model") == expected_model, "Candidate model mismatch.")
+    _require(
+        manifest.get("tokenizer") == expected_tokenizer,
+        "Candidate tokenizer mismatch.",
+    )
+    _require(manifest.get("seed") == expected_seed, "Candidate seed mismatch.")
+
+    file_hashes = manifest.get("file_sha256", {})
+    files = {
+        "public_candidates": public_path,
+        "private_labels": private_path,
+        "shadow_masks": masks_path,
+    }
+    for name, path in files.items():
+        _require(path.is_file(), f"Missing candidate artifact: {path}")
+        _require(
+            file_hashes.get(name) == file_sha256(path),
+            f"Candidate artifact hash mismatch: {path}",
+        )
+
+    public_rows = read_jsonl(public_path)
+    private_rows = read_jsonl(private_path)
+    public_ids = [str(row.get("candidate_id", "")) for row in public_rows]
+    private_ids = [str(row.get("candidate_id", "")) for row in private_rows]
+    _require(bool(public_ids), "Candidate table is empty.")
+    _require(
+        len(public_ids) == len(set(public_ids)),
+        "Candidate IDs are missing or duplicated.",
+    )
+    _require(public_ids == private_ids, "Public/private candidate order differs.")
+
+    row_counts = manifest.get("row_counts", {})
+    _require(
+        row_counts.get("public_candidates") == len(public_rows)
+        and row_counts.get("private_labels") == len(private_rows)
+        and row_counts.get("shadow_models") == expected_shadow_count,
+        "Candidate manifest row counts differ.",
+    )
+    with masks_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, [])
+        mask_rows = list(reader)
+    expected_header = [
+        "candidate_id",
+        *[f"shadow_{index:02d}" for index in range(expected_shadow_count)],
+    ]
+    _require(header == expected_header, "Candidate mask header differs.")
+    _require(
+        [row[0] for row in mask_rows] == public_ids,
+        "Candidate mask order differs from the public table.",
+    )
+    _require(
+        all(
+            len(row) == expected_shadow_count + 1 and set(row[1:]) == {"0", "1"}
+            for row in mask_rows
+        ),
+        "Candidate masks contain invalid values.",
+    )
+    return {
+        "status": "reused",
+        "path": str(root),
+        "source_shadow_count": expected_shadow_count,
+        "candidate_rows": len(public_rows),
+        "manifest_sha256": file_sha256(manifest_path),
+        "file_sha256": {name: file_hashes[name] for name in files},
+        "source_state": manifest.get("source_commit"),
+    }
 
 
 def validate_split_artifact(

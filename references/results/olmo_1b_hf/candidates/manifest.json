@@ -9,12 +9,17 @@
   "file_sha256": {
     "private_labels": "f6a0bb730436b227c6a1d1352357443301b95b3c203711b2830e8d0b3a1fdc7d",
     "public_candidates": "3becc1753808dd06c03c8290df77164632f4191496dfed71dac3f06707291b21",
-    "shadow_masks": "ac61cebe3fa866ab0682aeb352b6b92b51e99f7feb334836ff0ac5a57a66c6c0"
+    "shadow_masks": "29a0d67405ea96095447013fd278372b45f2799208a1b53fb59fffd808b40102"
   },
   "files": {
     "private_labels": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/candidates/private_labels.jsonl",
     "public_candidates": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/candidates/public_candidates.jsonl",
     "shadow_masks": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/candidates/shadow_masks.csv"
+  },
+  "mask_hash_correction": {
+    "corrected_sha256": "29a0d67405ea96095447013fd278372b45f2799208a1b53fb59fffd808b40102",
+    "previous_recorded_sha256": "ac61cebe3fa866ab0682aeb352b6b92b51e99f7feb334836ff0ac5a57a66c6c0",
+    "validation": "Every mask bit matched candidate content-hash membership in the five saved shadow train manifests; per-shadow IN counts also matched all inclusion summaries. No experiment artifact changed."
   },
   "model": "allenai/OLMo-1B-hf",
   "row_counts": {

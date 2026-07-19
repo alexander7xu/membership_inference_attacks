@@ -6,6 +6,7 @@ import logging
 import math
 import shutil
 from contextvars import ContextVar
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +76,9 @@ from src.llm_mia.plotting import (
 )
 from src.llm_mia.reuse import (
     ReuseValidationError,
+    prepare_lora_shadow_expansion_inputs,
     validate_base_generation_artifact,
+    validate_lora_candidate_artifact,
     validate_split_artifact,
 )
 
@@ -117,6 +120,10 @@ def run_stage(cfg: DictConfig, *, command: str) -> None:
             run_pipeline(cfg, project_root=project_root, command=command, smoke=False)
         elif stage == "prepare":
             prepare_data(cfg, project_root)
+        elif stage == "prepare_shadow_reuse":
+            prepare_shadow_expansion_reuse(
+                cfg, project_root=project_root, command=command
+            )
         elif stage == "train_target":
             train_target(cfg, project_root=project_root, command=command, smoke=False)
         elif stage == "evaluate":
@@ -135,6 +142,8 @@ def run_stage(cfg: DictConfig, *, command: str) -> None:
             train_shadows(cfg, project_root=project_root, command=command, smoke=False)
         elif stage == "attack":
             run_attack(cfg, project_root=project_root, command=command, smoke=False)
+        elif stage == "validate":
+            validate_formal_outputs(cfg, project_root=project_root, command=command)
         elif stage == "plot_rmia_feature":
             plot_rmia_feature_distribution(
                 cfg, project_root=project_root, command=command
@@ -518,6 +527,86 @@ def prepare_reuse_manifest(
     return manifest
 
 
+def prepare_shadow_expansion_reuse(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    command: str,
+) -> dict[str, Any]:
+    strategy = fine_tuning_strategy(cfg)
+    if strategy.name != "lora":
+        raise ValueError("Shadow-expansion reuse is only defined for LoRA runs.")
+    if not bool(cfg.reuse.enabled):
+        raise ValueError("Shadow-expansion reuse must be explicitly enabled.")
+
+    source_model_root = (
+        project_root / str(cfg.reuse.source_output_root) / str(cfg.model.key)
+    )
+    destination_model_root = model_root(cfg, project_root, smoke=False)
+    record = prepare_lora_shadow_expansion_inputs(
+        project_root=project_root,
+        source_model_root=source_model_root,
+        destination_model_root=destination_model_root,
+        expected_config=_resolved_config(cfg),
+        expected_source_shadow_count=int(cfg.reuse.expected_source_shadow_count),
+        seed=int(cfg.runtime.seed),
+        target_eval_name=strategy.target_eval_name,
+        force=bool(cfg.workflow.force),
+    )
+    run_dir = destination_model_root / "reuse"
+    manifest_path = run_dir / "manifest.json"
+    resolved_config_path = run_dir / str(cfg.report.resolved_config_filename)
+    write_json(manifest_path, record)
+    write_yaml(resolved_config_path, _resolved_config(cfg))
+    tracking_artifacts = _log_wandb_stage(
+        stage="reuse",
+        metrics={
+            "source_shadow_models": float(cfg.reuse.expected_source_shadow_count),
+            "destination_shadow_models": float(cfg.shadow.count),
+        },
+        paths={
+            "manifest": manifest_path,
+            "resolved_config": resolved_config_path,
+        },
+        reference_paths={
+            "source_target": source_model_root / "target",
+            "source_eval": source_model_root / "eval",
+            "source_generated": source_model_root / "generated",
+        },
+    )
+    write_experiment_markdown(
+        run_dir / str(cfg.report.experiment_filename),
+        purpose=(
+            "Reuse immutable target, evaluation, and generated artifacts while "
+            f"expanding {cfg.model.display_name} from "
+            f"{cfg.reuse.expected_source_shadow_count} to {cfg.shadow.count} shadows."
+        ),
+        hypothesis=str(cfg.experiment.hypothesis),
+        command=command,
+        overrides=[],
+        config_fingerprint_value=config_fingerprint(_resolved_config(cfg)),
+        git_state=collect_git_state(project_root),
+        environment=extended_environment(project_root),
+        artifacts={
+            "reuse_manifest": str(manifest_path.relative_to(project_root)),
+            "source_model_root": str(source_model_root.relative_to(project_root)),
+            **tracking_artifacts,
+        },
+        metrics={
+            "source_shadow_models": float(cfg.reuse.expected_source_shadow_count),
+            "destination_shadow_models": float(cfg.shadow.count),
+        },
+        conclusion=(
+            "All reused files passed config, presence, and SHA256 validation; "
+            "candidates, masks, shadows, and attack outputs remain new artifacts."
+        ),
+        achieved_purpose=True,
+        next_action="Build the 100-shadow candidate masks and train all shadows.",
+        wandb_run_id=_active_wandb_run_id(),
+    )
+    return record
+
+
 def base_generation_dir(cfg: DictConfig, project_root: Path, *, smoke: bool) -> Path:
     own_path = model_root(cfg, project_root, smoke=smoke) / "generated" / "base"
     if smoke or fine_tuning_strategy(cfg).name != "full":
@@ -590,6 +679,59 @@ def _resolved_config(cfg: DictConfig) -> dict[str, Any]:
     if not isinstance(resolved, dict):
         raise TypeError("Resolved Hydra config must be a mapping.")
     return resolved
+
+
+def _semantic_config_fingerprint(config: dict[str, Any]) -> str:
+    normalized = deepcopy(config)
+    workflow = normalized.get("workflow")
+    if isinstance(workflow, dict):
+        workflow.pop("stage", None)
+        workflow.pop("force", None)
+    return config_fingerprint(normalized)
+
+
+def _run_config_matches(cfg: DictConfig, run_dir: Path) -> bool:
+    resolved_config_path = run_dir / str(cfg.report.resolved_config_filename)
+    if not resolved_config_path.is_file():
+        return False
+    try:
+        prior = OmegaConf.to_container(
+            OmegaConf.load(resolved_config_path), resolve=True
+        )
+    except (OSError, ValueError):
+        return False
+    return _semantic_config_fingerprint(prior) == _semantic_config_fingerprint(
+        _resolved_config(cfg)
+    )
+
+
+def _artifact_record_is_complete(
+    cfg: DictConfig,
+    manifest_path: Path,
+    files: dict[str, Path],
+    *,
+    expected_row_counts: dict[str, int],
+) -> bool:
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = read_json(manifest_path)
+    except (OSError, ValueError):
+        return False
+    if manifest.get("semantic_config_sha256") != _semantic_config_fingerprint(
+        _resolved_config(cfg)
+    ):
+        return False
+    row_counts = manifest.get("row_counts", {})
+    if any(
+        row_counts.get(name) != count for name, count in expected_row_counts.items()
+    ):
+        return False
+    hashes = manifest.get("file_sha256", {})
+    return all(
+        path.is_file() and hashes.get(name) == file_sha256(path)
+        for name, path in files.items()
+    )
 
 
 def _training_run_is_complete(
@@ -806,6 +948,10 @@ def train_shadows(
         if _training_run_is_complete(cfg, run_dir, strategy) and not bool(
             cfg.workflow.force
         ):
+            if not _run_config_matches(cfg, run_dir):
+                raise ValueError(
+                    f"Existing shadow config does not match the current run: {run_dir}"
+                )
             LOGGER.info("Reusing existing shadow checkpoint: %s", checkpoint_path)
             checkpoints.append(checkpoint_path)
             continue
@@ -1509,10 +1655,139 @@ def candidate_paths(
     }
 
 
+def _build_reused_shadow_expansion_candidates(
+    cfg: DictConfig, *, project_root: Path
+) -> None:
+    paths = candidate_paths(cfg, project_root, smoke=False)
+    source_root = (
+        project_root
+        / str(cfg.reuse.source_output_root)
+        / str(cfg.model.key)
+        / "candidates"
+    )
+    source_record = validate_lora_candidate_artifact(
+        source_root,
+        expected_model=str(cfg.model.name_or_path),
+        expected_tokenizer=str(cfg.model.name_or_path),
+        expected_seed=int(cfg.runtime.seed),
+        expected_shadow_count=int(cfg.reuse.expected_source_shadow_count),
+    )
+    artifact_files = {
+        "public_candidates": paths["public"],
+        "evaluator_mapping": paths["private"],
+        "shadow_masks": paths["masks"],
+    }
+    source_files = {
+        "public_candidates": source_root / "public_candidates.jsonl",
+        "evaluator_mapping": source_root / "private_labels.jsonl",
+    }
+
+    if paths["manifest"].exists() and not bool(cfg.workflow.force):
+        public_rows = read_jsonl(paths["public"]) if paths["public"].is_file() else []
+        private_rows = (
+            read_jsonl(paths["private"]) if paths["private"].is_file() else []
+        )
+        existing_manifest = read_json(paths["manifest"])
+        if (
+            _artifact_record_is_complete(
+                cfg,
+                paths["manifest"],
+                artifact_files,
+                expected_row_counts={
+                    "public_candidates": len(public_rows),
+                    "evaluator_mapping": len(private_rows),
+                    "shadow_models": shadow_count(cfg, smoke=False),
+                },
+            )
+            and existing_manifest.get("source_candidate_artifact") == source_record
+            and all(
+                file_sha256(source) == file_sha256(artifact_files[name])
+                for name, source in source_files.items()
+            )
+        ):
+            LOGGER.info("Reusing expanded candidate masks: %s", paths["manifest"])
+            return
+        raise ValueError(
+            "Existing expanded candidate artifacts are incomplete or invalid. "
+            "Use workflow.force=true to rebuild them."
+        )
+
+    candidate_root = paths["manifest"].parent
+    existing_paths = [
+        *artifact_files.values(),
+        paths["raw_public"],
+        paths["raw_private"],
+    ]
+    if any(path.exists() for path in existing_paths) and not bool(cfg.workflow.force):
+        raise ValueError(
+            "Partial expanded candidate artifacts exist without a valid manifest. "
+            "Use workflow.force=true to rebuild them."
+        )
+    candidate_root.mkdir(parents=True, exist_ok=True)
+    for path in existing_paths:
+        if path.exists():
+            path.unlink()
+    shutil.copy2(source_files["public_candidates"], paths["public"])
+    shutil.copy2(source_files["evaluator_mapping"], paths["private"])
+    for name, source in source_files.items():
+        if file_sha256(source) != file_sha256(artifact_files[name]):
+            raise ValueError(
+                f"Copied candidate artifact failed hash validation: {name}"
+            )
+
+    public_rows = read_jsonl(paths["public"])
+    private_rows = read_jsonl(paths["private"])
+    candidate_ids = [str(row["candidate_id"]) for row in public_rows]
+    write_shadow_masks(
+        paths["masks"],
+        candidate_ids,
+        seed=int(cfg.runtime.seed) + int(cfg.shadow.seed_offset),
+        shadow_count=shadow_count(cfg, smoke=False),
+        inclusion_probability=float(cfg.shadow.inclusion_probability),
+    )
+    manifest = artifact_manifest(
+        cfg,
+        project_root,
+        artifact_files,
+        row_counts={
+            "public_candidates": len(public_rows),
+            "evaluator_mapping": len(private_rows),
+            "shadow_models": shadow_count(cfg, smoke=False),
+        },
+    )
+    manifest["candidate_source_mode"] = "exact_source_tables_new_masks"
+    manifest["source_candidate_artifact"] = source_record
+    write_json(paths["manifest"], manifest)
+    _log_wandb_stage(
+        stage="candidates",
+        metrics={
+            "public_candidates": float(len(public_rows)),
+            "source_shadow_models": float(cfg.reuse.expected_source_shadow_count),
+            "destination_shadow_models": float(cfg.shadow.count),
+        },
+        paths={
+            "public_candidates": paths["public"],
+            "evaluator_mapping": paths["private"],
+            "shadow_masks": paths["masks"],
+            "manifest": paths["manifest"],
+        },
+    )
+
+
 def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> None:
+    if not smoke and bool(OmegaConf.select(cfg, "reuse.enabled", default=False)):
+        _build_reused_shadow_expansion_candidates(cfg, project_root=project_root)
+        return
     paths = candidate_paths(cfg, project_root, smoke=smoke)
     if paths["manifest"].exists() and not bool(cfg.workflow.force):
         required = ("public", "private", "raw_public", "raw_private", "masks")
+        artifact_files = {
+            "raw_public_candidates": paths["raw_public"],
+            "raw_private_provenance": paths["raw_private"],
+            "public_candidates": paths["public"],
+            "evaluator_mapping": paths["private"],
+            "shadow_masks": paths["masks"],
+        }
         if all(paths[name].is_file() for name in required):
             existing_public = read_jsonl(paths["public"])
             existing_mapping = read_jsonl(paths["private"])
@@ -1525,6 +1800,16 @@ def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> 
             public_ids
             and public_ids == mapping_ids
             and len(public_ids) == len(existing_public)
+            and _artifact_record_is_complete(
+                cfg,
+                paths["manifest"],
+                artifact_files,
+                expected_row_counts={
+                    "public_candidates": len(existing_public),
+                    "evaluator_mapping": len(existing_mapping),
+                    "shadow_models": shadow_count(cfg, smoke),
+                },
+            )
         ):
             LOGGER.info("Reusing candidate set: %s", paths["manifest"])
             return
@@ -1676,11 +1961,35 @@ def run_attack(
     train_shadows(cfg, project_root=project_root, command=command, smoke=smoke)
     run_dir = model_root(cfg, project_root, smoke=smoke) / "attack"
     metrics_path = run_dir / "metrics.json"
-    if metrics_path.exists() and not bool(cfg.workflow.force):
-        LOGGER.info("Reusing attack outputs: %s", metrics_path)
-        return
-
     paths = candidate_paths(cfg, project_root, smoke=smoke)
+    scores_path = run_dir / "online_rmia_scores.jsonl"
+    manifest_path = run_dir / "manifest.json"
+    experiment_path = run_dir / str(cfg.report.experiment_filename)
+    if any(
+        path.exists() for path in (scores_path, metrics_path, manifest_path)
+    ) and not bool(cfg.workflow.force):
+        candidate_rows = read_jsonl(paths["public"])
+        if experiment_path.is_file() and _artifact_record_is_complete(
+            cfg,
+            manifest_path,
+            {"scores": scores_path, "metrics": metrics_path},
+            expected_row_counts={
+                "candidates": len(candidate_rows),
+                "population": (
+                    candidate_limit(cfg, smoke)
+                    if smoke
+                    else int(cfg.data.squad_validation_population_size)
+                ),
+                "shadow_models": shadow_count(cfg, smoke),
+            },
+        ):
+            LOGGER.info("Reusing attack outputs: %s", metrics_path)
+            return
+        raise ValueError(
+            "Existing attack outputs do not match the current configuration. "
+            "Use workflow.force=true only to intentionally rebuild them."
+        )
+
     public_rows = read_jsonl(paths["public"])
     candidates = [record_from_public_candidate(row) for row in public_rows]
     masks = read_shadow_masks(paths["masks"])
@@ -1764,7 +2073,6 @@ def run_attack(
                 ),
             }
         )
-    scores_path = run_dir / "online_rmia_scores.jsonl"
     write_jsonl(scores_path, score_rows)
 
     population_rmia_scores = [
@@ -1790,7 +2098,7 @@ def run_attack(
     )
     write_json(metrics_path, metrics)
     write_json(
-        run_dir / "manifest.json",
+        manifest_path,
         artifact_manifest(
             cfg,
             project_root,
@@ -1808,7 +2116,7 @@ def run_attack(
         paths={
             "scores": scores_path,
             "metrics": metrics_path,
-            "manifest": run_dir / "manifest.json",
+            "manifest": manifest_path,
         },
     )
     write_experiment_markdown(
@@ -1835,6 +2143,212 @@ def run_attack(
         achieved_purpose=True,
         next_action="Compare model families and true membership-conditioned distributions.",
         wandb_run_id=_active_wandb_run_id(),
+    )
+
+
+def validate_formal_outputs(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    command: str,
+) -> None:
+    strategy = fine_tuning_strategy(cfg)
+    if strategy.name != "lora" or not bool(cfg.reuse.enabled):
+        raise ValueError("This validation stage requires LoRA shadow-expansion reuse.")
+
+    root = model_root(cfg, project_root, smoke=False)
+    expected_shadow_count = shadow_count(cfg, smoke=False)
+    paths = candidate_paths(cfg, project_root, smoke=False)
+    public_rows = read_jsonl(paths["public"])
+    private_rows = read_jsonl(paths["private"])
+    candidate_files = {
+        "public_candidates": paths["public"],
+        "evaluator_mapping": paths["private"],
+        "shadow_masks": paths["masks"],
+    }
+    if not _artifact_record_is_complete(
+        cfg,
+        paths["manifest"],
+        candidate_files,
+        expected_row_counts={
+            "public_candidates": len(public_rows),
+            "evaluator_mapping": len(private_rows),
+            "shadow_models": expected_shadow_count,
+        },
+    ):
+        raise ValueError("Candidate artifacts failed final manifest validation.")
+
+    masks = read_shadow_masks(paths["masks"])
+    if set(masks) != {str(row["candidate_id"]) for row in public_rows} or any(
+        len(mask) != expected_shadow_count for mask in masks.values()
+    ):
+        raise ValueError(
+            "Candidate masks do not match the configured shadow count: "
+            f"{expected_shadow_count}."
+        )
+
+    source_candidates = (
+        project_root
+        / str(cfg.reuse.source_output_root)
+        / str(cfg.model.key)
+        / "candidates"
+    )
+    source_record = validate_lora_candidate_artifact(
+        source_candidates,
+        expected_model=str(cfg.model.name_or_path),
+        expected_tokenizer=str(cfg.model.name_or_path),
+        expected_seed=int(cfg.runtime.seed),
+        expected_shadow_count=int(cfg.reuse.expected_source_shadow_count),
+    )
+    candidate_manifest = read_json(paths["manifest"])
+    if (
+        candidate_manifest.get("candidate_source_mode")
+        != "exact_source_tables_new_masks"
+        or candidate_manifest.get("source_candidate_artifact") != source_record
+    ):
+        raise ValueError("Candidate manifest is not bound to the source tables.")
+    source_candidate_hashes = {
+        "public_candidates.jsonl": file_sha256(
+            source_candidates / "public_candidates.jsonl"
+        ),
+        "private_labels.jsonl": file_sha256(source_candidates / "private_labels.jsonl"),
+    }
+    if source_candidate_hashes != {
+        "public_candidates.jsonl": file_sha256(paths["public"]),
+        "private_labels.jsonl": file_sha256(paths["private"]),
+    }:
+        raise ValueError("Candidate text or evaluator labels changed from source run.")
+
+    shadow_records = {}
+    expected_shadow_names = {
+        f"shadow_{index:02d}" for index in range(expected_shadow_count)
+    }
+    shadow_root = root / "shadows"
+    actual_shadow_names = {
+        path.name for path in shadow_root.glob("shadow_*") if path.is_dir()
+    }
+    if actual_shadow_names != expected_shadow_names:
+        raise ValueError("Saved shadow directories do not match the configured count.")
+    for index in range(expected_shadow_count):
+        run_dir = shadow_root / f"shadow_{index:02d}"
+        checkpoint = run_dir / strategy.checkpoint_dirname
+        if not _training_run_is_complete(cfg, run_dir, strategy):
+            raise ValueError(f"Shadow training record is incomplete: {run_dir}")
+        if not _run_config_matches(cfg, run_dir):
+            raise ValueError(f"Shadow config mismatch: {run_dir}")
+        summary = read_json(run_dir / "inclusion_summary.json")
+        included = sum(mask[index] for mask in masks.values())
+        expected_train_size = int(cfg.shadow.train_size)
+        if summary != {
+            "shadow_index": index,
+            "included_candidates": included,
+            "filled_from_auxiliary_pool": expected_train_size - included,
+            "forbidden_target_overlap": 0,
+            "train_size": expected_train_size,
+        }:
+            raise ValueError(f"Shadow inclusion summary mismatch: {run_dir}")
+        record_files = [
+            run_dir / "train_manifest.jsonl",
+            run_dir / "inclusion_summary.json",
+            run_dir / "metrics.json",
+            run_dir / str(cfg.report.resolved_config_filename),
+            run_dir / str(cfg.report.experiment_filename),
+            *sorted(path for path in checkpoint.rglob("*") if path.is_file()),
+        ]
+        if not all(path.is_file() for path in record_files):
+            raise FileNotFoundError(f"Shadow record files are missing: {run_dir}")
+        shadow_records[f"shadow_{index:02d}"] = {
+            path.relative_to(run_dir).as_posix(): file_sha256(path)
+            for path in record_files
+        }
+
+    attack_dir = root / "attack"
+    attack_files = {
+        "scores": attack_dir / "online_rmia_scores.jsonl",
+        "metrics": attack_dir / "metrics.json",
+    }
+    if (
+        not _artifact_record_is_complete(
+            cfg,
+            attack_dir / "manifest.json",
+            attack_files,
+            expected_row_counts={
+                "candidates": len(public_rows),
+                "population": int(cfg.data.squad_validation_population_size),
+                "shadow_models": expected_shadow_count,
+            },
+        )
+        or not (attack_dir / str(cfg.report.experiment_filename)).is_file()
+    ):
+        raise ValueError("Attack artifacts failed final manifest validation.")
+
+    attack_metrics = read_json(attack_dir / "metrics.json")
+    summary_metrics = {
+        key: float(value) for key, value in attack_metrics.items() if _is_number(value)
+    }
+    experiment_path = root / str(cfg.report.experiment_filename)
+    write_experiment_markdown(
+        experiment_path,
+        purpose=(
+            f"Complete the {expected_shadow_count}-shadow online RMIA run for "
+            f"{cfg.model.display_name}."
+        ),
+        hypothesis=str(cfg.experiment.hypothesis),
+        command=command,
+        overrides=[],
+        config_fingerprint_value=config_fingerprint(_resolved_config(cfg)),
+        git_state=collect_git_state(project_root),
+        environment=extended_environment(project_root),
+        artifacts={
+            "reuse_manifest": str(
+                (root / "reuse" / "manifest.json").relative_to(project_root)
+            ),
+            "candidate_manifest": str(paths["manifest"].relative_to(project_root)),
+            "attack_manifest": str(
+                (attack_dir / "manifest.json").relative_to(project_root)
+            ),
+        },
+        metrics=summary_metrics,
+        conclusion=(
+            f"All {expected_shadow_count} adapters, masks, candidates, and attack "
+            "outputs passed count, configuration, and SHA256 validation."
+        ),
+        achieved_purpose=True,
+        next_action="Compare the 100-shadow estimator with the prior five-shadow run.",
+        wandb_run_id=_active_wandb_run_id(),
+    )
+    completion_manifest_path = root / "completion_manifest.json"
+    completion_manifest = {
+        "config_sha256": config_fingerprint(_resolved_config(cfg)),
+        "semantic_config_sha256": _semantic_config_fingerprint(_resolved_config(cfg)),
+        "model": str(cfg.model.name_or_path),
+        "shadow_models": expected_shadow_count,
+        "candidate_rows": len(public_rows),
+        "source_candidate_sha256": source_candidate_hashes,
+        "candidate_manifest_sha256": file_sha256(paths["manifest"]),
+        "reuse_manifest_sha256": file_sha256(root / "reuse" / "manifest.json"),
+        "shadow_artifact_sha256": shadow_records,
+        "attack_artifact_sha256": {
+            **{name: file_sha256(path) for name, path in attack_files.items()},
+            "manifest": file_sha256(attack_dir / "manifest.json"),
+            "experiment": file_sha256(attack_dir / str(cfg.report.experiment_filename)),
+        },
+        "experiment_sha256": file_sha256(experiment_path),
+    }
+    write_json(completion_manifest_path, completion_manifest)
+    success_path = root / "_SUCCESS"
+    success_path.write_text("verified\n", encoding="utf-8")
+    _log_wandb_stage(
+        stage="validation",
+        metrics={
+            "shadow_models": float(expected_shadow_count),
+            "candidate_rows": float(len(public_rows)),
+        },
+        paths={
+            "completion_manifest": completion_manifest_path,
+            "experiment": experiment_path,
+            "success": success_path,
+        },
     )
 
 
@@ -2292,9 +2806,11 @@ def artifact_manifest(
     *,
     row_counts: dict[str, int],
 ) -> dict[str, Any]:
+    resolved_config = _resolved_config(cfg)
     return {
         "source_commit": collect_git_state(project_root),
-        "config_sha256": config_fingerprint(OmegaConf.to_container(cfg, resolve=True)),
+        "config_sha256": config_fingerprint(resolved_config),
+        "semantic_config_sha256": _semantic_config_fingerprint(resolved_config),
         "seed": int(cfg.runtime.seed),
         "model": str(cfg.model.name_or_path),
         "tokenizer": str(cfg.model.name_or_path),
