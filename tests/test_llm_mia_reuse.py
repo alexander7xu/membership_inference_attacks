@@ -16,7 +16,11 @@ from src.llm_mia.reuse import (
     validate_lora_candidate_artifact,
     validate_split_artifact,
 )
-from src.llm_mia.workflow import _semantic_config_fingerprint
+from src.llm_mia.workflow import (
+    _artifact_record_is_complete,
+    _semantic_config_fingerprint,
+    artifact_manifest,
+)
 
 GENERATION_CONFIG = {
     "do_sample": False,
@@ -424,6 +428,44 @@ def test_semantic_config_fingerprint_ignores_only_workflow_controls() -> None:
     assert _semantic_config_fingerprint(build) == _semantic_config_fingerprint(attack)
     assert _semantic_config_fingerprint(build) != _semantic_config_fingerprint(
         changed_training
+    )
+
+
+def test_artifact_manifest_hashes_exact_file_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "src.llm_mia.workflow.collect_git_state",
+        lambda _project_root: {"commit": "test"},
+    )
+    cfg = OmegaConf.create(
+        {
+            "runtime": {"seed": 42},
+            "model": {"name_or_path": "owner/model"},
+            "workflow": {
+                "stage": "build_candidates",
+                "profile": "formal",
+                "force": False,
+            },
+        }
+    )
+    masks_path = tmp_path / "shadow_masks.csv"
+    masks_path.write_bytes(b"candidate_id,shadow_00\r\ncandidate-0,1\r\n")
+    manifest = artifact_manifest(
+        cfg,
+        tmp_path,
+        {"shadow_masks": masks_path},
+        row_counts={"shadow_models": 1},
+    )
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, manifest)
+
+    assert manifest["file_sha256"]["shadow_masks"] == file_sha256(masks_path)
+    assert _artifact_record_is_complete(
+        cfg,
+        manifest_path,
+        {"shadow_masks": masks_path},
+        expected_row_counts={"shadow_models": 1},
     )
 
 

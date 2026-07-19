@@ -47,7 +47,6 @@ from src.llm_mia.data import (
     split_records,
     split_squad_train,
     squad_row_to_record,
-    text_sha256,
     trivia_row_to_record,
     write_json,
     write_jsonl,
@@ -2817,9 +2816,7 @@ def artifact_manifest(
         "row_counts": row_counts,
         "files": {name: str(path) for name, path in files.items()},
         "file_sha256": {
-            name: text_sha256(path.read_text(encoding="utf-8"))
-            for name, path in files.items()
-            if path.exists()
+            name: file_sha256(path) for name, path in files.items() if path.exists()
         },
     }
 
