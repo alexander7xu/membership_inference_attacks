@@ -321,6 +321,7 @@ def training_arguments(
     *,
     max_steps: int | None,
     seed: int | None = None,
+    evaluate_each_epoch: bool = False,
 ) -> TrainingArguments:
     training_seed = int(cfg.runtime.seed) if seed is None else int(seed)
     kwargs: dict[str, Any] = {
@@ -366,11 +367,12 @@ def training_arguments(
         )
     if max_steps is not None:
         kwargs["max_steps"] = int(max_steps)
+    evaluation_strategy = "epoch" if evaluate_each_epoch else "no"
     signature = inspect.signature(TrainingArguments)
     if "eval_strategy" in signature.parameters:
-        kwargs["eval_strategy"] = "no"
+        kwargs["eval_strategy"] = evaluation_strategy
     else:
-        kwargs["evaluation_strategy"] = "no"
+        kwargs["evaluation_strategy"] = evaluation_strategy
     return TrainingArguments(**kwargs)
 
 
@@ -383,6 +385,7 @@ def make_trainer(
     output_dir: str,
     max_steps: int | None,
     seed: int | None = None,
+    eval_records: dict[str, list[QARecord]] | None = None,
 ) -> Trainer:
     train_dataset = CompletionOnlyDataset(
         train_records,
@@ -390,10 +393,30 @@ def make_trainer(
         int(cfg.tokenizer.max_length),
         preprocessing_workers=int(cfg.tokenizer.preprocessing_workers),
     )
+    eval_dataset = (
+        {
+            name: CompletionOnlyDataset(
+                records,
+                tokenizer,
+                int(cfg.tokenizer.max_length),
+                preprocessing_workers=int(cfg.tokenizer.preprocessing_workers),
+            )
+            for name, records in eval_records.items()
+        }
+        if eval_records is not None
+        else None
+    )
     return Trainer(
         model=model,
-        args=training_arguments(output_dir, cfg, max_steps=max_steps, seed=seed),
+        args=training_arguments(
+            output_dir,
+            cfg,
+            max_steps=max_steps,
+            seed=seed,
+            evaluate_each_epoch=eval_dataset is not None,
+        ),
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=CompletionOnlyCollator(tokenizer),
     )
 

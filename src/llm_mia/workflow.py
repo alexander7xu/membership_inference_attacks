@@ -428,6 +428,28 @@ def eval_limit(cfg: DictConfig, smoke: bool) -> int | None:
     return None if value is None else int(value)
 
 
+def _evaluation_records(cfg: DictConfig, *, smoke: bool) -> dict[str, list[QARecord]]:
+    limit = eval_limit(cfg, smoke)
+    return {
+        "squad_validation": deterministic_subset(
+            load_squad_records(cfg, "validation"),
+            seed=int(cfg.runtime.seed),
+            limit=limit,
+            namespace="eval_squad_validation",
+        ),
+        "trivia_validation": deterministic_subset(
+            load_trivia_records(cfg, "validation", limit=limit),
+            seed=int(cfg.runtime.seed),
+            limit=limit,
+            namespace="eval_trivia_validation",
+        ),
+    }
+
+
+def _target_eval_each_epoch(cfg: DictConfig) -> bool:
+    return bool(OmegaConf.select(cfg, "train.target_eval_each_epoch", default=False))
+
+
 def _base_generation_source_ids(
     cfg: DictConfig, project_root: Path, *, smoke: bool
 ) -> dict[str, list[str]]:
@@ -737,6 +759,8 @@ def _training_run_is_complete(
     cfg: DictConfig,
     run_dir: Path,
     strategy: FineTuningStrategy,
+    *,
+    extra_required_files: tuple[Path, ...] = (),
 ) -> bool:
     config_sha256 = config_fingerprint(_resolved_config(cfg))
     checkpoint_path = run_dir / strategy.checkpoint_dirname
@@ -745,6 +769,7 @@ def _training_run_is_complete(
         run_dir / "metrics.json",
         run_dir / str(cfg.report.resolved_config_filename),
         run_dir / str(cfg.report.experiment_filename),
+        *extra_required_files,
     )
     if strategy.name == "full":
         required_files = (*required_files, run_dir / "run_manifest.json")
@@ -789,6 +814,69 @@ def _latest_logged_metric(trainer: Any, name: str) -> float | None:
         if _is_number(value):
             return float(value)
     return None
+
+
+def _epoch_validation_metrics(
+    log_history: list[dict[str, Any]],
+    eval_records: dict[str, list[QARecord]],
+    *,
+    expected_epochs: int | None,
+) -> dict[str, Any]:
+    epoch_rows: dict[tuple[float, int], dict[str, Any]] = {}
+    for log_row in log_history:
+        epoch = log_row.get("epoch")
+        step = log_row.get("step")
+        if not _is_number(epoch) or not _is_number(step):
+            continue
+        key = (float(epoch), int(step))
+        for dataset_name in eval_records:
+            loss_key = f"eval_{dataset_name}_loss"
+            loss = log_row.get(loss_key)
+            if not _is_number(loss):
+                continue
+            row = epoch_rows.setdefault(
+                key,
+                {"epoch": float(epoch), "global_step": int(step)},
+            )
+            if dataset_name in row:
+                raise ValueError(
+                    f"Duplicate {dataset_name} validation loss at epoch {epoch}, "
+                    f"step {step}."
+                )
+            loss_value = float(loss)
+            row[dataset_name] = {
+                "loss": loss_value,
+                "perplexity": perplexity(loss_value),
+            }
+
+    epochs = [epoch_rows[key] for key in sorted(epoch_rows)]
+    for row in epochs:
+        missing = [name for name in eval_records if name not in row]
+        if missing:
+            raise ValueError(
+                f"Epoch {row['epoch']} step {row['global_step']} is missing "
+                f"validation losses for: {', '.join(missing)}."
+            )
+    if not epochs:
+        raise ValueError("Target epoch evaluation produced no validation losses.")
+    if expected_epochs is not None:
+        expected = [float(index) for index in range(1, expected_epochs + 1)]
+        actual = [float(row["epoch"]) for row in epochs]
+        if len(actual) != len(expected) or any(
+            not math.isclose(value, target, abs_tol=1e-6)
+            for value, target in zip(actual, expected, strict=True)
+        ):
+            raise ValueError(
+                f"Expected target validation at epochs {expected}, got {actual}."
+            )
+
+    return {
+        "evaluation_strategy": "epoch",
+        "datasets": {
+            name: {"records": len(records)} for name, records in eval_records.items()
+        },
+        "epochs": epochs,
+    }
 
 
 def _remove_temporary_checkpoints(trainer_dir: Path) -> None:
@@ -846,9 +934,15 @@ def train_target(
     )
     strategy = fine_tuning_strategy(cfg)
     checkpoint_path = run_dir / strategy.checkpoint_dirname
-    if _training_run_is_complete(cfg, run_dir, strategy) and not bool(
-        cfg.workflow.force
-    ):
+    epoch_validation_path = run_dir / "epoch_validation_metrics.json"
+    target_eval_each_epoch = _target_eval_each_epoch(cfg)
+    required_epoch_files = (epoch_validation_path,) if target_eval_each_epoch else ()
+    if _training_run_is_complete(
+        cfg,
+        run_dir,
+        strategy,
+        extra_required_files=required_epoch_files,
+    ) and not bool(cfg.workflow.force):
         LOGGER.info("Reusing existing target checkpoint: %s", checkpoint_path)
         return checkpoint_path
     records = load_split_file(cfg, project_root, "squad_target_train")
@@ -869,6 +963,9 @@ def train_target(
         command=command,
         max_steps_value=max_steps(cfg, smoke),
         model_seed=training_seed(cfg, None),
+        eval_records=(
+            _evaluation_records(cfg, smoke=smoke) if target_eval_each_epoch else None
+        ),
     )
 
 
@@ -995,7 +1092,10 @@ def train_model(
     command: str,
     max_steps_value: int | None,
     model_seed: int,
+    eval_records: dict[str, list[QARecord]] | None = None,
 ) -> Path:
+    if role != "target" and eval_records is not None:
+        raise ValueError("Only target training may receive evaluation records.")
     run_dir.mkdir(parents=True, exist_ok=True)
     strategy = fine_tuning_strategy(cfg)
     resolved_config = _resolved_config(cfg)
@@ -1044,6 +1144,7 @@ def train_model(
         output_dir=str(trainer_dir),
         max_steps=max_steps_value,
         seed=model_seed,
+        eval_records=eval_records,
     )
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -1052,6 +1153,19 @@ def train_model(
     )
     result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_state()
+    epoch_validation_path: Path | None = None
+    if eval_records is not None:
+        epoch_validation_path = run_dir / "epoch_validation_metrics.json"
+        write_json(
+            epoch_validation_path,
+            _epoch_validation_metrics(
+                trainer.state.log_history,
+                eval_records,
+                expected_epochs=(
+                    int(cfg.train.epochs) if max_steps_value is None else None
+                ),
+            ),
+        )
     strategy.validate_trainable(trainer.model)
     checkpoint_path = strategy.save_final(
         trainer.model,
@@ -1076,6 +1190,14 @@ def train_model(
         value = _latest_logged_metric(trainer, metric_name)
         if value is not None:
             metrics[f"train/final_{metric_name}"] = value
+    if eval_records is not None:
+        for dataset_name in eval_records:
+            value = _latest_logged_metric(trainer, f"eval_{dataset_name}_loss")
+            if value is not None:
+                metrics[f"train/final_eval_{dataset_name}_loss"] = value
+                metrics[f"train/final_eval_{dataset_name}_perplexity"] = perplexity(
+                    value
+                )
     write_json(run_dir / "metrics.json", metrics)
     stage_name = role if shadow_index is None else f"shadow_{shadow_index:02d}"
     checkpoint_artifact = {strategy.artifact_name: checkpoint_path}
@@ -1086,6 +1208,11 @@ def train_model(
             **({} if strategy.name == "full" else checkpoint_artifact),
             "metrics": run_dir / "metrics.json",
             "resolved_config": run_dir / str(cfg.report.resolved_config_filename),
+            **(
+                {"epoch_validation_metrics": epoch_validation_path}
+                if epoch_validation_path is not None
+                else {}
+            ),
         },
         reference_paths=(checkpoint_artifact if strategy.name == "full" else None),
     )
@@ -1107,6 +1234,11 @@ def train_model(
             strategy.artifact_name: str(checkpoint_path),
             "metrics": str(run_dir / "metrics.json"),
             "resolved_config": str(run_dir / str(cfg.report.resolved_config_filename)),
+            **(
+                {"epoch_validation_metrics": str(epoch_validation_path)}
+                if epoch_validation_path is not None
+                else {}
+            ),
             **tracking_artifacts,
         },
         metrics=metrics,
@@ -1176,25 +1308,11 @@ def evaluate_model(
         LOGGER.info("Reusing existing eval metrics: %s", metrics_path)
         return
     limit = eval_limit(cfg, smoke)
-    squad_validation = deterministic_subset(
-        load_squad_records(cfg, "validation"),
-        seed=int(cfg.runtime.seed),
-        limit=limit,
-        namespace="eval_squad_validation",
-    )
-    trivia_validation = deterministic_subset(
-        load_trivia_records(cfg, "validation", limit=limit),
-        seed=int(cfg.runtime.seed),
-        limit=limit,
-        namespace="eval_trivia_validation",
-    )
+    evaluation_records = _evaluation_records(cfg, smoke=smoke)
     strategy = fine_tuning_strategy(cfg)
     model, tokenizer = strategy.load_for_inference(cfg, checkpoint_path)
     metrics: dict[str, float] = {}
-    for name, records in [
-        ("squad_validation", squad_validation),
-        ("trivia_validation", trivia_validation),
-    ]:
+    for name, records in evaluation_records.items():
         loss_metrics = completion_metrics(
             model,
             tokenizer,

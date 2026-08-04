@@ -489,3 +489,28 @@ def test_more_shadows_config_changes_only_declared_experiment_fields() -> None:
     expanded.pop("reuse")
 
     assert expanded == base
+
+
+def test_more_epochs_config_changes_only_declared_experiment_fields() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    base = OmegaConf.to_container(
+        OmegaConf.load(project_root / "conf" / "squad_lora_rmia.yaml"),
+        resolve=False,
+    )
+    extended = OmegaConf.to_container(
+        OmegaConf.load(project_root / "conf" / "squad_lora_rmia_more_epochs.yaml"),
+        resolve=False,
+    )
+    assert isinstance(base, dict)
+    assert isinstance(extended, dict)
+    assert extended["train"]["epochs"] == 10
+    assert extended["train"]["target_eval_each_epoch"] is True
+    assert extended["shadow"]["count"] == 5
+
+    extended["experiment"] = base["experiment"]
+    extended["paths"]["output_root"] = base["paths"]["output_root"]
+    extended["train"]["epochs"] = base["train"]["epochs"]
+    extended["train"].pop("target_eval_each_epoch")
+    extended["wandb"]["tags"] = base["wandb"]["tags"]
+
+    assert extended == base
