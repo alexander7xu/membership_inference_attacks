@@ -13,13 +13,18 @@ runtime:
   deterministic: false
 
 experiment:
-  purpose: "Measure how 10-epoch SQuAD LoRA fine-tuning changes target utility and membership-conditioned score distributions."
-  hypothesis: "Longer target and shadow fine-tuning may change completion loss, QA utility, and target/reference score separation without changing other experiment settings."
+  purpose: "Measure 10-epoch SQuAD LoRA utility and membership-conditioned score distributions under inherited baseline candidate masks."
+  hypothesis: "Longer fine-tuning may change utility and score separation; the historical comparison is descriptive because target-overlap-free shadow filler differs from the 1-epoch run."
 
 workflow:
   stage: smoke
   profile: smoke
   force: false
+
+mask_reuse:
+  enabled: true
+  source_output_root: outputs/squad_lora_rmia/formal
+  expected_source_shadow_count: 5
 
 paths:
   output_root: outputs/squad_lora_rmia_more_epochs

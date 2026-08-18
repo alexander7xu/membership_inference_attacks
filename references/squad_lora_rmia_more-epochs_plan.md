@@ -3,11 +3,12 @@
 ## Objective
 
 Repeat the formal experiment in `references/squad_lora_rmia_experiment_plan.md`
-with one controlled training-length change: train every target LoRA adapter and
-every shadow LoRA adapter for 10 epochs instead of 1 epoch. Target training also
-records loss-only validation evidence at every epoch boundary so the longer run can
-be inspected without selecting a checkpoint. All other model, data, optimization,
-generation, scoring, attack, final evaluation, and reporting settings remain fixed.
+with an intended training-length change: train every target LoRA adapter and every
+shadow LoRA adapter for 10 epochs instead of 1 epoch. Target training also records
+loss-only validation evidence at every epoch boundary so the longer run can be
+inspected without selecting a checkpoint. Candidate-to-shadow masks are inherited
+from the verified baseline. The current target-overlap-free filler policy is kept;
+historical filler rows are not reproduced.
 
 The experiment tests how longer fine-tuning changes QA utility, generated text,
 completion-score distributions, and membership-conditioned RMIA results. It does
@@ -24,9 +25,10 @@ The claim boundary from the source plan is unchanged:
   population-calibrated statistic, auditor-capability RMIA results.
 - This is not a label-blind deployable-attacker benchmark.
 
-The primary controlled comparison is the verified 1-epoch formal run versus this
-10-epoch run. Conclusions must distinguish effects of longer training from
-uncontrolled implementation or data changes.
+The verified 1-epoch run and this 10-epoch run form a descriptive comparison,
+not a pure epoch-only causal contrast. Mask assignments are matched, but 36--41
+historical filler records per shadow overlap target-training content and are replaced
+by the current target-overlap-free policy. Conclusions must state this limitation.
 
 ## Pre-Registered Hypotheses
 
@@ -61,14 +63,16 @@ uncontrolled implementation or data changes.
 | Data | Same pinned SQuAD and TriviaQA revisions, split rules, row IDs, and hashes |
 | Candidates | Same six 1,024-record groups and deterministic group-major order |
 | Population | Same disjoint 1,024-row SQuAD validation calibration population |
-| Shadow masks | Same five-shadow construction, deterministic mask seed, and IN/OUT constraints |
+| Shadow masks | Exact five-column assignments inherited from the verified baseline through validated gold IDs and generated-source alignment |
+| Shadow filler | Deterministic target-overlap-free filler; not byte-identical to the historical 1-epoch filler |
 | RMIA | `gamma=0.5`, logsumexp aggregation, 2,000 deterministic bootstrap resamples |
 | Tracking | Hydra with `hydra.job.chdir=false`, project-root paths, mandatory seed, W&B offline |
 
 Do not rescale the learning rate, alter warmup or scheduler hyperparameters, change
 batch size, or change gradient accumulation to compensate for the longer run. The
 number of optimizer updates and scheduler steps may increase only as the derived
-consequence of changing the epoch count from 1 to 10.
+consequence of changing the epoch count from 1 to 10. The recorded filler correction
+is an explicit compatibility exception and limits causal interpretation.
 
 ## Output Isolation and Baseline Protection
 
@@ -85,6 +89,7 @@ the resolved 10-epoch configuration differs from the baseline only in:
 
 - the epoch value (`1` to `10`);
 - experiment/run names and independent output paths;
+- the mask-reuse dependency declaration and target-overlap-free filler evidence;
 - derived total-step, scheduler-step, checkpoint-step, and progress counters;
 - timestamps, process identifiers, hardware observations, and artifact digests
   that necessarily belong to the new run.
@@ -201,18 +206,20 @@ IDs and group-major order so corresponding baseline and 10-epoch records can be
 paired by ID. Generated-record content hashes may differ as a direct consequence
 of the controlled training change.
 
-Use the same deterministic five-column Bernoulli(0.5) shadow-mask construction
-and require one to four IN shadows for every candidate. For stable candidate IDs,
-mask assignments must match the baseline assignments. Fail if the algorithm,
-seed, ID order, or IN/OUT assignment changes unexpectedly.
+Inherit the exact five-column baseline mask rather than resampling it. Gold rows
+must match baseline candidate ID, content hash, group, and source ID. Generated rows
+must match baseline raw generation position, group, and source ID; their historical
+content hash resolves the baseline canonical mask. Project raw assignments onto the
+current content-canonical table and fail on any missing row, hash mismatch, identity
+mismatch, uncovered canonical candidate, or conflicting duplicate assignment.
 
 For shadow `j`:
 
-1. Include the candidates selected by the unchanged mask column `j`.
-2. Use the same deterministic auxiliary-pool filler selection and require exactly
-   43,799 distinct content hashes.
-3. Exclude target-training records from filler; a target-training candidate may
-   enter only through its explicit IN mask.
+1. Include the candidates selected by inherited mask column `j`.
+2. Select deterministic auxiliary-pool filler under the current target-overlap-free
+   rule and require exactly 43,799 distinct content hashes.
+3. Record the historical filler divergence; do not restore the 36--41 contaminated
+   baseline rows per shadow merely to manufacture an epoch-only comparison.
 4. Initialize a fresh LoRA adapter from the pinned base model.
 5. Train for 10 epochs with every other training setting unchanged. Supply no
    validation dataset, schedule no evaluation calls, and emit no epoch-validation
@@ -221,9 +228,9 @@ For shadow `j`:
    config, trainer state, metrics, source/environment state, W&B offline record,
    and `experiment.md`.
 
-The generated candidate text may differ from the baseline, but candidate IDs,
-mask assignments, source prompt identities, and auxiliary filler row IDs must
-remain paired wherever the source protocol permits.
+Generated candidate text may differ from the baseline. Mask assignments and source
+prompt identities remain paired under the validated mapping; auxiliary filler IDs
+follow the safer current policy and their historical differences are reported.
 
 ## Text-Only Scoring and RMIA
 
@@ -275,9 +282,9 @@ source-prompt comparison and the new materialized-text distribution. Do not trea
 changed generated text as if it were byte-identical paired evidence.
 
 Keep utility, generation quality, raw score distributions, RMIA results, and
-1-versus-10-epoch comparisons in separate report sections. Conclusions must state
-that epoch count was the intended controlled training change and list any failed
-compatibility checks or unavoidable derived differences.
+1-versus-10-epoch comparisons in separate report sections. Conclusions must describe
+the comparison as observational, name the filler-policy difference, and list any
+failed compatibility checks or unavoidable derived differences.
 
 ## Formal Records and Reproducibility
 
@@ -303,10 +310,10 @@ mixing baseline and 10-epoch evidence.
 ## Implementation and Execution Sequence
 
 Use the restartable runner
-`scripts/run_squad_lora_rmia_more_epochs_formal.sh`, which accepts exactly one
-model key. Submit exactly two independent one-GPU jobs through `mysubmit`: one for
-`pythia_410m` and one for `olmo_1b_hf`. Each job runs its model family sequentially
-through these stages:
+`scripts/run_squad_lora_rmia_more_epochs_formal.sh` for a complete model run and
+`scripts/submit_squad_lora_rmia_more_epochs_repair.sh` for the two recovery jobs.
+The project-owned submitter calls Slurm directly so a failed child command produces
+a failed job rather than a false successful status. A complete model run uses:
 
 1. `prepare`;
 2. `train_target`;
@@ -321,17 +328,18 @@ complete for each model. Candidate/population scoring, RMIA, plotting, comparati
 analysis, reporting, and final attack validation are explicitly deferred to a
 later submission decision; they are not included in these two jobs.
 
-Submit the jobs sequentially because `mysubmit` rewrites its shared Slurm wrapper.
-Use partition `xe8545`, one GPU per job, unique job names, and the scheduler's
-`6-23:30:00` time limit. Restartability comes from the existing per-stage and
-per-shadow completeness checks; do not use `workflow.force=true` for a routine
-resubmission.
+Submit `pythia-shadows` to one 40GB GPU on `xe8545` and `olmo-full` to
+one 80GB GPU on `tmp`. The model roots and logs are independent, so both jobs may
+run concurrently. Keep batch size 16, gradient accumulation 2, BF16, one GPU, and
+the `6-23:30:00` limit. Restartability comes from existing completeness checks; do
+not use `workflow.force=true` for a routine resubmission.
 
 Before formal launch, require:
 
 ```text
 uv lock --check
 bash -n scripts/run_squad_lora_rmia_more_epochs_formal.sh
+bash -n scripts/submit_squad_lora_rmia_more_epochs_repair.sh
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
@@ -378,8 +386,8 @@ model families:
 - zero shadow validation datasets, evaluation calls, named evaluation losses, or
   `epoch_validation_metrics.json` files;
 - unchanged pinned revisions, split identities, target rows, candidate-source
-  rows, mask assignments, auxiliary filler selections, seeds, and all non-epoch
-  scientific hyperparameters;
+  rows, inherited mask assignments, seeds, and all non-epoch scientific
+  hyperparameters, plus an explicit record of target-overlap-free filler divergence;
 - complete resolved configs, manifests, metrics, W&B-offline records, and
   `experiment.md` files for the submitted stages.
 

@@ -75,9 +75,11 @@ from src.llm_mia.plotting import (
 )
 from src.llm_mia.reuse import (
     ReuseValidationError,
+    inherit_lora_candidate_masks,
     prepare_lora_shadow_expansion_inputs,
     validate_base_generation_artifact,
     validate_lora_candidate_artifact,
+    validate_lora_mask_reuse_source,
     validate_split_artifact,
 )
 
@@ -1895,6 +1897,14 @@ def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> 
     if not smoke and bool(OmegaConf.select(cfg, "reuse.enabled", default=False)):
         _build_reused_shadow_expansion_candidates(cfg, project_root=project_root)
         return
+    mask_reuse_enabled = not smoke and bool(
+        OmegaConf.select(cfg, "mask_reuse.enabled", default=False)
+    )
+    mask_reuse_source_root = (
+        project_root / str(cfg.mask_reuse.source_output_root) / str(cfg.model.key)
+        if mask_reuse_enabled
+        else None
+    )
     paths = candidate_paths(cfg, project_root, smoke=smoke)
     if paths["manifest"].exists() and not bool(cfg.workflow.force):
         required = ("public", "private", "raw_public", "raw_private", "masks")
@@ -1913,8 +1923,25 @@ def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> 
         else:
             public_ids = set()
             mapping_ids = set()
+        existing_manifest = read_json(paths["manifest"])
+        mask_reuse_source_matches = True
+        if mask_reuse_enabled:
+            assert mask_reuse_source_root is not None
+            current_source = validate_lora_mask_reuse_source(
+                project_root=project_root,
+                source_model_root=mask_reuse_source_root,
+                expected_model=str(cfg.model.name_or_path),
+                expected_tokenizer=str(cfg.model.name_or_path),
+                expected_seed=int(cfg.runtime.seed),
+                expected_shadow_count=int(cfg.mask_reuse.expected_source_shadow_count),
+                expected_group_size=int(cfg.data.candidate_limit),
+            )
+            mask_reuse_source_matches = (
+                existing_manifest.get("mask_reuse", {}).get("source") == current_source
+            )
         if (
             public_ids
+            and mask_reuse_source_matches
             and public_ids == mapping_ids
             and len(public_ids) == len(existing_public)
             and _artifact_record_is_complete(
@@ -2023,7 +2050,20 @@ def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> 
     write_jsonl(paths["private"], private_rows)
     candidate_ids = [row["candidate_id"] for row in public_rows]
     mask_seed = int(cfg.runtime.seed) + int(cfg.shadow.seed_offset)
-    if smoke:
+    mask_reuse_record: dict[str, Any] | None = None
+    if mask_reuse_enabled:
+        assert mask_reuse_source_root is not None
+        mask_reuse_record = inherit_lora_candidate_masks(
+            project_root=project_root,
+            source_model_root=mask_reuse_source_root,
+            destination_candidate_root=paths["manifest"].parent,
+            expected_model=str(cfg.model.name_or_path),
+            expected_tokenizer=str(cfg.model.name_or_path),
+            expected_seed=int(cfg.runtime.seed),
+            expected_shadow_count=int(cfg.mask_reuse.expected_source_shadow_count),
+            expected_group_size=int(cfg.data.candidate_limit),
+        )
+    elif smoke:
         write_single_shadow_smoke_mask(
             paths["masks"],
             candidate_ids,
@@ -2056,6 +2096,9 @@ def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> 
             "shadow_models": shadow_count(cfg, smoke),
         },
     )
+    if mask_reuse_record is not None:
+        manifest["candidate_source_mode"] = "baseline_mask_inheritance"
+        manifest["mask_reuse"] = mask_reuse_record
     write_json(paths["manifest"], manifest)
     _log_wandb_stage(
         stage="candidates",

@@ -41,6 +41,16 @@ _LORA_INFERENCE_REUSE_CONFIG_SECTIONS = (
 _HISTORICAL_TARGET_IGNORED_CONFIG_KEYS = {
     "tokenizer": {"preprocessing_workers"},
 }
+_MASK_REUSE_GOLD_GROUPS = (
+    "gold_squad_target_train",
+    "gold_squad_validation",
+    "gold_trivia_validation",
+)
+_MASK_REUSE_GENERATED_GROUPS = (
+    "gen_from_squad_train",
+    "gen_from_squad_validation",
+    "gen_from_trivia_validation",
+)
 
 
 def _require(condition: bool, message: str) -> None:
@@ -407,6 +417,347 @@ def validate_lora_candidate_artifact(
         "manifest_sha256": file_sha256(manifest_path),
         "file_sha256": {name: file_hashes[name] for name in files},
         "source_state": manifest.get("source_commit"),
+    }
+
+
+def _validate_mask_reuse_generated_artifact(
+    root: Path,
+    *,
+    project_root: Path,
+    expected_model: str,
+    expected_tokenizer: str,
+    expected_seed: int,
+    expected_rows: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    manifest_path = root / "manifest.json"
+    public_path = root / "public_generated.jsonl"
+    private_path = root / "private_generated_labels.jsonl"
+    _require(manifest_path.is_file(), f"Missing generated manifest: {manifest_path}")
+    manifest = read_json(manifest_path)
+    _require(manifest.get("model") == expected_model, "Generated model mismatch.")
+    _require(
+        manifest.get("tokenizer") == expected_tokenizer,
+        "Generated tokenizer mismatch.",
+    )
+    _require(manifest.get("seed") == expected_seed, "Generated seed mismatch.")
+    row_counts = manifest.get("row_counts", {})
+    _require(
+        row_counts.get("public_generated") == expected_rows
+        and row_counts.get("private_generated_labels") == expected_rows,
+        "Generated row-count mismatch.",
+    )
+    file_hashes = manifest.get("file_sha256", {})
+    files = {
+        "public_generated": public_path,
+        "private_generated_labels": private_path,
+    }
+    for name, path in files.items():
+        _require(path.is_file(), f"Missing generated artifact: {path}")
+        _require(
+            file_hashes.get(name) == file_sha256(path),
+            f"Generated artifact hash mismatch: {path}",
+        )
+
+    public_rows = read_jsonl(public_path)
+    private_rows = read_jsonl(private_path)
+    _require(
+        len(public_rows) == expected_rows and len(private_rows) == expected_rows,
+        "Generated table length mismatch.",
+    )
+    _require(
+        all(
+            str(public.get("candidate_id", "")) == str(private.get("candidate_id", ""))
+            for public, private in zip(public_rows, private_rows, strict=True)
+        ),
+        "Generated public/private candidate order differs.",
+    )
+    return (
+        {
+            "root": root.relative_to(project_root).as_posix(),
+            "manifest_sha256": file_sha256(manifest_path),
+            "file_sha256": {name: file_hashes[name] for name in files},
+            "rows": expected_rows,
+            "source_state": manifest.get("source_commit"),
+        },
+        public_rows,
+        private_rows,
+    )
+
+
+def validate_lora_mask_reuse_source(
+    *,
+    project_root: Path,
+    source_model_root: Path,
+    expected_model: str,
+    expected_tokenizer: str,
+    expected_seed: int,
+    expected_shadow_count: int,
+    expected_group_size: int,
+) -> dict[str, Any]:
+    """Validate the baseline candidate masks and ordered generated rows."""
+    candidate_root = source_model_root / "candidates"
+    candidate_record = validate_lora_candidate_artifact(
+        candidate_root,
+        expected_model=expected_model,
+        expected_tokenizer=expected_tokenizer,
+        expected_seed=expected_seed,
+        expected_shadow_count=expected_shadow_count,
+    )
+    generated_record, _, _ = _validate_mask_reuse_generated_artifact(
+        source_model_root / "generated",
+        project_root=project_root,
+        expected_model=expected_model,
+        expected_tokenizer=expected_tokenizer,
+        expected_seed=expected_seed,
+        expected_rows=len(_MASK_REUSE_GENERATED_GROUPS) * expected_group_size,
+    )
+    return {
+        "model_root": source_model_root.relative_to(project_root).as_posix(),
+        "candidate_artifact": {
+            "manifest_sha256": candidate_record["manifest_sha256"],
+            "file_sha256": candidate_record["file_sha256"],
+            "rows": candidate_record["candidate_rows"],
+            "shadow_count": candidate_record["source_shadow_count"],
+            "source_state": candidate_record["source_state"],
+        },
+        "generated_artifact": generated_record,
+    }
+
+
+def inherit_lora_candidate_masks(
+    *,
+    project_root: Path,
+    source_model_root: Path,
+    destination_candidate_root: Path,
+    expected_model: str,
+    expected_tokenizer: str,
+    expected_seed: int,
+    expected_shadow_count: int,
+    expected_group_size: int,
+) -> dict[str, Any]:
+    """Inherit baseline masks through exact gold and generated-row alignment."""
+    source_record = validate_lora_mask_reuse_source(
+        project_root=project_root,
+        source_model_root=source_model_root,
+        expected_model=expected_model,
+        expected_tokenizer=expected_tokenizer,
+        expected_seed=expected_seed,
+        expected_shadow_count=expected_shadow_count,
+        expected_group_size=expected_group_size,
+    )
+    source_candidate_root = source_model_root / "candidates"
+    source_public = read_jsonl(source_candidate_root / "public_candidates.jsonl")
+    source_private = read_jsonl(source_candidate_root / "private_labels.jsonl")
+    with (source_candidate_root / "shadow_masks.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        reader = csv.DictReader(handle)
+        source_masks = {
+            str(row["candidate_id"]): [
+                int(row[f"shadow_{index:02d}"])
+                for index in range(expected_shadow_count)
+            ]
+            for row in reader
+        }
+
+    source_by_id: dict[str, tuple[dict[str, Any], dict[str, Any], list[int]]] = {}
+    source_by_content: dict[str, tuple[dict[str, Any], dict[str, Any], list[int]]] = {}
+    for public, private in zip(source_public, source_private, strict=True):
+        candidate = str(public.get("candidate_id", ""))
+        content_hash = str(public.get("content_sha256", ""))
+        _require(
+            candidate == str(private.get("candidate_id", "")),
+            "Baseline candidate public/private order differs.",
+        )
+        _require(candidate in source_masks, f"Missing baseline mask: {candidate}")
+        _require(
+            content_hash not in source_by_content,
+            f"Duplicate baseline candidate content: {content_hash}",
+        )
+        entry = (public, private, source_masks[candidate])
+        source_by_id[candidate] = entry
+        source_by_content[content_hash] = entry
+
+    _, source_generated_public, source_generated_private = (
+        _validate_mask_reuse_generated_artifact(
+            source_model_root / "generated",
+            project_root=project_root,
+            expected_model=expected_model,
+            expected_tokenizer=expected_tokenizer,
+            expected_seed=expected_seed,
+            expected_rows=len(_MASK_REUSE_GENERATED_GROUPS) * expected_group_size,
+        )
+    )
+    destination_files = {
+        "raw public candidates": destination_candidate_root
+        / "raw_public_candidates.jsonl",
+        "raw private provenance": destination_candidate_root
+        / "raw_private_provenance.jsonl",
+        "public candidates": destination_candidate_root / "public_candidates.jsonl",
+        "evaluator mapping": destination_candidate_root / "evaluator_mapping.jsonl",
+    }
+    for name, path in destination_files.items():
+        _require(path.is_file(), f"Missing destination {name}: {path}")
+    raw_public = read_jsonl(destination_files["raw public candidates"])
+    raw_private = read_jsonl(destination_files["raw private provenance"])
+    canonical_public = read_jsonl(destination_files["public candidates"])
+    evaluator_mapping = read_jsonl(destination_files["evaluator mapping"])
+
+    expected_groups = [
+        group
+        for group in (*_MASK_REUSE_GOLD_GROUPS, *_MASK_REUSE_GENERATED_GROUPS)
+        for _ in range(expected_group_size)
+    ]
+    expected_raw_rows = len(expected_groups)
+    _require(
+        len(raw_public) == expected_raw_rows
+        and len(raw_private) == expected_raw_rows
+        and len(evaluator_mapping) == expected_raw_rows,
+        "Destination candidate row-count mismatch.",
+    )
+    _require(
+        [str(row.get("private_group", "")) for row in raw_private] == expected_groups,
+        "Destination candidate groups or order differ.",
+    )
+
+    expected_canonical: list[dict[str, Any]] = []
+    canonical_by_id: dict[str, dict[str, Any]] = {}
+    for raw_index, (public, private, mapping) in enumerate(
+        zip(raw_public, raw_private, evaluator_mapping, strict=True)
+    ):
+        source_candidate_id = str(public.get("candidate_id", ""))
+        _require(
+            source_candidate_id == str(private.get("candidate_id", "")),
+            "Destination raw public/private candidate order differs.",
+        )
+        content_hash = str(public.get("content_sha256", ""))
+        _require(bool(content_hash), "Destination candidate content hash is missing.")
+        canonical_id = f"candidate_{content_hash[:20]}"
+        model_row = {
+            "candidate_id": canonical_id,
+            "prompt": str(public.get("prompt", "")),
+            "completion": str(public.get("completion", "")),
+            "content_sha256": content_hash,
+        }
+        previous = canonical_by_id.get(canonical_id)
+        if previous is None:
+            canonical_by_id[canonical_id] = model_row
+            expected_canonical.append(model_row)
+        else:
+            _require(
+                previous == model_row,
+                f"Canonical destination candidate collision: {canonical_id}",
+            )
+        expected_mapping = {
+            **private,
+            "candidate_id": canonical_id,
+            "source_candidate_id": source_candidate_id,
+            "raw_row_index": raw_index,
+        }
+        _require(
+            mapping == expected_mapping,
+            f"Destination evaluator mapping differs at raw row {raw_index}.",
+        )
+    _require(
+        canonical_public == expected_canonical,
+        "Destination canonical candidate table differs from its raw rows.",
+    )
+
+    inherited_by_canonical: dict[str, list[int]] = {}
+    gold_rows = len(_MASK_REUSE_GOLD_GROUPS) * expected_group_size
+    for raw_index, (public, private) in enumerate(
+        zip(raw_public, raw_private, strict=True)
+    ):
+        content_hash = str(public["content_sha256"])
+        if raw_index < gold_rows:
+            source_candidate_id = str(public["candidate_id"])
+            source = source_by_id.get(source_candidate_id)
+            _require(
+                source is not None,
+                f"Gold candidate is absent from the baseline: {source_candidate_id}",
+            )
+            _require(
+                str(source[0].get("content_sha256", "")) == content_hash,
+                f"Gold candidate content differs: {source_candidate_id}",
+            )
+            _require(
+                str(source[1].get("private_group", ""))
+                == str(private.get("private_group", ""))
+                and str(source[1].get("source_id", ""))
+                == str(private.get("source_id", "")),
+                f"Gold candidate identity differs: {source_candidate_id}",
+            )
+        else:
+            generated_index = raw_index - gold_rows
+            source_generated = source_generated_public[generated_index]
+            source_generated_label = source_generated_private[generated_index]
+            _require(
+                str(source_generated_label.get("private_group", ""))
+                == str(private.get("private_group", ""))
+                and str(source_generated_label.get("source_id", ""))
+                == str(private.get("source_id", "")),
+                f"Generated source identity differs at row {generated_index}.",
+            )
+            source_content_hash = str(source_generated.get("content_sha256", ""))
+            source = source_by_content.get(source_content_hash)
+            _require(
+                source is not None,
+                f"Generated baseline content is absent from candidates: "
+                f"{source_content_hash}",
+            )
+        mask = source[2]
+        canonical_id = f"candidate_{content_hash[:20]}"
+        previous_mask = inherited_by_canonical.get(canonical_id)
+        _require(
+            previous_mask is None or previous_mask == mask,
+            f"Canonical candidate inherits conflicting masks: {canonical_id}",
+        )
+        inherited_by_canonical[canonical_id] = mask
+
+    canonical_ids = [str(row["candidate_id"]) for row in canonical_public]
+    _require(
+        set(inherited_by_canonical) == set(canonical_ids),
+        "Inherited masks do not cover the canonical candidate table.",
+    )
+    destination_mask_path = destination_candidate_root / "shadow_masks.csv"
+    fieldnames = [
+        "candidate_id",
+        *[f"shadow_{index:02d}" for index in range(expected_shadow_count)],
+    ]
+    with destination_mask_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for candidate in canonical_ids:
+            mask = inherited_by_canonical[candidate]
+            writer.writerow(
+                {
+                    "candidate_id": candidate,
+                    **{
+                        f"shadow_{index:02d}": value for index, value in enumerate(mask)
+                    },
+                }
+            )
+    included_counts = [
+        sum(inherited_by_canonical[candidate][index] for candidate in canonical_ids)
+        for index in range(expected_shadow_count)
+    ]
+    return {
+        "mode": "baseline_mask_inheritance",
+        "source": source_record,
+        "mapping": {
+            "gold": "source_candidate_id_with_content_and_identity_check",
+            "generated": "raw_position_with_group_and_source_id_check",
+            "canonicalization": "content_sha256_with_conflict_rejection",
+        },
+        "row_counts": {
+            "raw_candidates": expected_raw_rows,
+            "gold_candidates": gold_rows,
+            "generated_candidates": len(source_generated_public),
+            "canonical_candidates": len(canonical_ids),
+            "mask_conflicts": 0,
+        },
+        "included_candidates_by_shadow": included_counts,
+        "shadow_masks_sha256": file_sha256(destination_mask_path),
     }
 
 
