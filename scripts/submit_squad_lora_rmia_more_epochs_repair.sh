@@ -31,18 +31,11 @@ log_dir="$project_root/logs"
 mkdir -p "$log_dir"
 
 mounts="/home/c01xuju/CISPA-home/.home:/home/c01xuju:ro,/home/c01xuju/CISPA-home:/home/c01xuju/CISPA-home:rw,/home/c01xuju/CISPA-az6/c01xuju-2026:/home/c01xuju/CISPA-az6/c01xuju-2026:rw"
-job_command=$(cat <<EOF
-set +e
-source /home/c01xuju/.envrc
-set -euo pipefail
-command -v uv >/dev/null
-export WANDB_MODE=offline
-export TOKENIZERS_PARALLELISM=false
-cd $project_root
-$command
-EOF
-)
-printf -v quoted_command '%q' "$job_command"
+job_command="set +e; source /home/c01xuju/.envrc; set -euo pipefail"
+job_command+="; command -v uv >/dev/null"
+job_command+="; export WANDB_MODE=offline"
+job_command+="; export TOKENIZERS_PARALLELISM=false"
+job_command+="; cd $project_root; $command"
 
 sbatch \
   --parsable \
@@ -58,4 +51,4 @@ sbatch \
   --container-workdir="$project_root" \
   --container-mounts="$mounts" \
   --container-name="$job_name" \
-  --wrap="bash -lc $quoted_command"
+  --wrap="exec bash -lc '$job_command'"

@@ -24,5 +24,7 @@ def test_more_epochs_repair_submitter_routes_resources_and_preserves_exit_status
     assert "run_squad_lora_rmia_more_epochs_formal.sh olmo_1b_hf" in script
     assert "exec uv run python" in script
     assert "exec bash" in script
-    assert "--wrap" in script
+    assert "printf -v quoted_command" not in script
+    assert "job_command+=" in script
+    assert "--wrap=\"exec bash -lc '$job_command'\"" in script
     assert "mysubmit" not in script
