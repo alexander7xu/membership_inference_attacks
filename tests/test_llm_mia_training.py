@@ -178,6 +178,97 @@ def test_train_model_rejects_shadow_evaluation_records(tmp_path: Path) -> None:
         )
 
 
+def test_training_completion_can_ignore_target_only_declaration_and_mask_metadata(
+    tmp_path: Path,
+) -> None:
+    prior_cfg = OmegaConf.create(
+        {
+            "report": {
+                "resolved_config_filename": "resolved_config.yaml",
+                "experiment_filename": "experiment.md",
+            },
+            "workflow": {"stage": "train_target", "force": False},
+            "train": {"epochs": 10},
+            "experiment": {"purpose": "original declaration"},
+        }
+    )
+    current_cfg = OmegaConf.create(OmegaConf.to_container(prior_cfg, resolve=True))
+    current_cfg.workflow.stage = "train_shadows"
+    current_cfg.experiment.purpose = "updated declaration"
+    current_cfg.mask_reuse = {
+        "enabled": True,
+        "source_output_root": "outputs/squad_lora_rmia/formal",
+        "expected_source_shadow_count": 5,
+    }
+    run_dir = tmp_path / "target"
+    adapter_dir = run_dir / "adapter"
+    adapter_dir.mkdir(parents=True)
+    (adapter_dir / "adapter_config.json").write_text("{}\n", encoding="utf-8")
+    for name in ("train_manifest.jsonl", "metrics.json", "experiment.md"):
+        (run_dir / name).write_text("{}\n", encoding="utf-8")
+    OmegaConf.save(prior_cfg, run_dir / "resolved_config.yaml")
+    strategy = workflow.LoraFineTuningStrategy()
+
+    assert not workflow._training_run_is_complete(current_cfg, run_dir, strategy)
+    assert workflow._training_run_is_complete(
+        current_cfg,
+        run_dir,
+        strategy,
+        ignored_config_sections=("experiment", "mask_reuse"),
+    )
+
+    current_cfg.train.epochs = 11
+    assert not workflow._training_run_is_complete(
+        current_cfg,
+        run_dir,
+        strategy,
+        ignored_config_sections=("experiment", "mask_reuse"),
+    )
+
+
+def test_train_target_ignores_mask_reuse_for_completion_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = OmegaConf.create(
+        {
+            "runtime": {"seed": 42},
+            "train": {"target_eval_each_epoch": True},
+            "workflow": {"force": False},
+        }
+    )
+    captured: dict[str, object] = {}
+
+    def fake_complete(
+        cfg: object,
+        run_dir: Path,
+        strategy: object,
+        *,
+        extra_required_files: tuple[Path, ...] = (),
+        ignored_config_sections: tuple[str, ...] = (),
+    ) -> bool:
+        del cfg, run_dir, strategy
+        captured["extra_required_files"] = extra_required_files
+        captured["ignored_config_sections"] = ignored_config_sections
+        return True
+
+    monkeypatch.setattr(workflow, "model_root", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(workflow, "_training_run_is_complete", fake_complete)
+
+    checkpoint = workflow.train_target(
+        cfg,
+        project_root=tmp_path,
+        command="test",
+        smoke=False,
+    )
+
+    target_dir = tmp_path / "target" / "seed_42"
+    assert checkpoint == target_dir / "adapter"
+    assert captured == {
+        "extra_required_files": (target_dir / "epoch_validation_metrics.json",),
+        "ignored_config_sections": ("experiment", "mask_reuse"),
+    }
+
+
 def test_evaluation_records_share_formal_and_smoke_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

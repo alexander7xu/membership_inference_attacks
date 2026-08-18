@@ -704,12 +704,16 @@ def _resolved_config(cfg: DictConfig) -> dict[str, Any]:
     return resolved
 
 
-def _semantic_config_fingerprint(config: dict[str, Any]) -> str:
+def _semantic_config_fingerprint(
+    config: dict[str, Any], *, ignored_sections: tuple[str, ...] = ()
+) -> str:
     normalized = deepcopy(config)
     workflow = normalized.get("workflow")
     if isinstance(workflow, dict):
         workflow.pop("stage", None)
         workflow.pop("force", None)
+    for section in ignored_sections:
+        normalized.pop(section, None)
     return config_fingerprint(normalized)
 
 
@@ -763,21 +767,38 @@ def _training_run_is_complete(
     strategy: FineTuningStrategy,
     *,
     extra_required_files: tuple[Path, ...] = (),
+    ignored_config_sections: tuple[str, ...] = (),
 ) -> bool:
-    config_sha256 = config_fingerprint(_resolved_config(cfg))
     checkpoint_path = run_dir / strategy.checkpoint_dirname
+    resolved_config_path = run_dir / str(cfg.report.resolved_config_filename)
     required_files = (
         run_dir / "train_manifest.jsonl",
         run_dir / "metrics.json",
-        run_dir / str(cfg.report.resolved_config_filename),
+        resolved_config_path,
         run_dir / str(cfg.report.experiment_filename),
         *extra_required_files,
     )
     if strategy.name == "full":
         required_files = (*required_files, run_dir / "run_manifest.json")
-    return strategy.checkpoint_is_complete(
-        checkpoint_path, config_sha256=config_sha256
-    ) and all(path.is_file() for path in required_files)
+    if not all(path.is_file() for path in required_files):
+        return False
+    try:
+        prior_config = OmegaConf.to_container(
+            OmegaConf.load(resolved_config_path), resolve=True
+        )
+    except (OSError, ValueError):
+        return False
+    if not isinstance(prior_config, dict):
+        return False
+    current_config = _resolved_config(cfg)
+    if _semantic_config_fingerprint(
+        prior_config, ignored_sections=ignored_config_sections
+    ) != _semantic_config_fingerprint(
+        current_config, ignored_sections=ignored_config_sections
+    ):
+        return False
+    config_sha256 = config_fingerprint(prior_config)
+    return strategy.checkpoint_is_complete(checkpoint_path, config_sha256=config_sha256)
 
 
 def _resume_checkpoint(
@@ -944,6 +965,7 @@ def train_target(
         run_dir,
         strategy,
         extra_required_files=required_epoch_files,
+        ignored_config_sections=("experiment", "mask_reuse"),
     ) and not bool(cfg.workflow.force):
         LOGGER.info("Reusing existing target checkpoint: %s", checkpoint_path)
         return checkpoint_path
