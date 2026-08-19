@@ -31,10 +31,17 @@ log_dir="$project_root/logs"
 mkdir -p "$log_dir"
 
 mounts="/home/c01xuju/CISPA-home/.home:/home/c01xuju:ro,/home/c01xuju/CISPA-home:/home/c01xuju/CISPA-home:rw,/home/c01xuju/CISPA-az6/c01xuju-2026:/home/c01xuju/CISPA-az6/c01xuju-2026:rw"
+cache_root="/home/c01xuju/CISPA-home/.cache"
+data_root="/home/c01xuju/CISPA-home/.local/share"
 job_command="set +e; source /home/c01xuju/.envrc; set -euo pipefail"
 job_command+="; command -v uv >/dev/null"
 job_command+="; export WANDB_MODE=offline"
 job_command+="; export TOKENIZERS_PARALLELISM=false"
+job_command+="; export XDG_CACHE_HOME=$cache_root"
+job_command+="; export WANDB_CACHE_DIR=$cache_root/wandb"
+job_command+="; export WANDB_DATA_DIR=$data_root/wandb"
+job_command+="; export TRITON_CACHE_DIR=$cache_root/triton"
+job_command+="; mkdir -p $cache_root/wandb $cache_root/triton $data_root/wandb"
 job_command+="; cd $project_root; $command"
 
 sbatch \
