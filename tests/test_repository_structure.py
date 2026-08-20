@@ -27,10 +27,14 @@ def test_more_epochs_repair_submitter_routes_resources_and_preserves_exit_status
     assert "printf -v quoted_command" not in script
     assert "job_command+=" in script
     assert "--wrap=\"exec bash -lc '$job_command'\"" in script
-    assert "/home/c01xuju/CISPA-home/.home:/home/c01xuju:ro" in script
-    assert "/home/c01xuju/CISPA-home:/home/c01xuju/CISPA-home:rw" in script
-    assert 'cache_root="/home/c01xuju/CISPA-home/.cache"' in script
-    assert 'data_root="/home/c01xuju/CISPA-home/.local/share"' in script
+    assert "source /home/c01xuju/CISPA-home/home/.envrc" in script
+    assert 'shared_project_root=$(readlink -f "$project_root")' in script
+    assert 'log_dir="$shared_project_root/logs"' in script
+    assert '--container-image="$PYXIS_CONTAINER_IMAGE"' in script
+    assert '--container-mounts="$PYXIS_CONTAINER_MOUNTS"' in script
+    assert "/home/c01xuju/CISPA-home/.docker_image" not in script
+    assert 'cache_root="/home/c01xuju/.cache"' in script
+    assert 'data_root="/home/c01xuju/.local/share"' in script
     assert "export TORCH_DISABLE_NATIVE_JIT=1" in script
     assert "export XDG_CACHE_HOME=$cache_root" in script
     assert "export WANDB_CACHE_DIR=$cache_root/wandb" in script

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source /home/c01xuju/CISPA-home/home/.envrc
+
 cd "$(dirname "$0")/.."
 
 if [[ $# -ne 1 ]]; then
@@ -25,14 +27,14 @@ case "$mode" in
 esac
 
 project_root=$(pwd)
+shared_project_root=$(readlink -f "$project_root")
 stamp=$(date -u +%Y%m%d_%H%M%S)
 job_name="squad_lora_10e_${mode}_${stamp}"
-log_dir="$project_root/logs"
+log_dir="$shared_project_root/logs"
 mkdir -p "$log_dir"
 
-mounts="/home/c01xuju/CISPA-home/.home:/home/c01xuju:ro,/home/c01xuju/CISPA-home:/home/c01xuju/CISPA-home:rw,/home/c01xuju/CISPA-az6/c01xuju-2026:/home/c01xuju/CISPA-az6/c01xuju-2026:rw"
-cache_root="/home/c01xuju/CISPA-home/.cache"
-data_root="/home/c01xuju/CISPA-home/.local/share"
+cache_root="/home/c01xuju/.cache"
+data_root="/home/c01xuju/.local/share"
 job_command="set +e; source /home/c01xuju/.envrc; set -euo pipefail"
 job_command+="; command -v uv >/dev/null"
 job_command+="; export WANDB_MODE=offline"
@@ -55,8 +57,8 @@ sbatch \
   --job-name="$job_name" \
   --output="$log_dir/%x_%j.log" \
   --time=6-23:30:00 \
-  --container-image=/home/c01xuju/CISPA-home/.docker_image/cu129.sqsh \
+  --container-image="$PYXIS_CONTAINER_IMAGE" \
   --container-workdir="$project_root" \
-  --container-mounts="$mounts" \
+  --container-mounts="$PYXIS_CONTAINER_MOUNTS" \
   --container-name="$job_name" \
   --wrap="exec bash -lc '$job_command'"
