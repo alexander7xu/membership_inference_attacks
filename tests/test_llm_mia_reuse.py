@@ -29,6 +29,7 @@ from src.llm_mia.reuse import (
 from src.llm_mia.workflow import (
     _artifact_record_is_complete,
     _semantic_config_fingerprint,
+    _validate_mask_reuse_candidate_lineage,
     artifact_manifest,
 )
 
@@ -741,6 +742,55 @@ def test_mask_reuse_inherits_gold_and_positionally_aligned_generated_masks(
         expected_shadow_count=5,
         expected_group_size=1,
     )
+
+
+def test_mask_reuse_final_validation_checks_bound_manifest(tmp_path: Path) -> None:
+    record, _, destination_root = _inherit_fixture_masks(tmp_path)
+    write_json(
+        destination_root / "manifest.json",
+        {
+            "candidate_source_mode": "baseline_mask_inheritance",
+            "mask_reuse": record,
+        },
+    )
+    cfg = OmegaConf.create(
+        {
+            "runtime": {"seed": 42},
+            "model": {"key": "model", "name_or_path": "owner/model"},
+            "data": {"candidate_limit": 1},
+            "mask_reuse": {
+                "source_output_root": "baseline",
+                "expected_source_shadow_count": 5,
+            },
+        }
+    )
+    public_rows = read_jsonl(destination_root / "public_candidates.jsonl")
+    masks = read_shadow_masks(destination_root / "shadow_masks.csv")
+
+    assert (
+        _validate_mask_reuse_candidate_lineage(
+            cfg,
+            project_root=tmp_path,
+            candidate_root=destination_root,
+            public_rows=public_rows,
+            masks=masks,
+            expected_shadow_count=5,
+        )
+        == record
+    )
+
+    invalid_manifest = deepcopy(read_json(destination_root / "manifest.json"))
+    invalid_manifest["mask_reuse"]["included_candidates_by_shadow"][0] += 1
+    write_json(destination_root / "manifest.json", invalid_manifest)
+    with pytest.raises(ValueError, match="not bound to the baseline masks"):
+        _validate_mask_reuse_candidate_lineage(
+            cfg,
+            project_root=tmp_path,
+            candidate_root=destination_root,
+            public_rows=public_rows,
+            masks=masks,
+            expected_shadow_count=5,
+        )
 
 
 def test_mask_reuse_rejects_conflicting_canonical_masks(tmp_path: Path) -> None:

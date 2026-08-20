@@ -2328,6 +2328,67 @@ def run_attack(
     )
 
 
+def _validate_mask_reuse_candidate_lineage(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    candidate_root: Path,
+    public_rows: list[dict[str, Any]],
+    masks: dict[str, list[int]],
+    expected_shadow_count: int,
+) -> dict[str, Any]:
+    raw_public = read_jsonl(candidate_root / "raw_public_candidates.jsonl")
+    raw_private = read_jsonl(candidate_root / "raw_private_provenance.jsonl")
+    group_size = int(cfg.data.candidate_limit)
+    expected_gold_rows = 3 * group_size
+    expected_generated_rows = 3 * group_size
+    expected_raw_rows = expected_gold_rows + expected_generated_rows
+    if len(raw_public) != expected_raw_rows or len(raw_private) != expected_raw_rows:
+        raise ValueError("Mask-reuse raw candidate row count mismatch.")
+
+    source_model_root = (
+        project_root / str(cfg.mask_reuse.source_output_root) / str(cfg.model.key)
+    )
+    source_record = validate_lora_mask_reuse_source(
+        project_root=project_root,
+        source_model_root=source_model_root,
+        expected_model=str(cfg.model.name_or_path),
+        expected_tokenizer=str(cfg.model.name_or_path),
+        expected_seed=int(cfg.runtime.seed),
+        expected_shadow_count=int(cfg.mask_reuse.expected_source_shadow_count),
+        expected_group_size=group_size,
+    )
+    included_counts = [
+        sum(mask[index] for mask in masks.values())
+        for index in range(expected_shadow_count)
+    ]
+    expected_record = {
+        "mode": "baseline_mask_inheritance",
+        "source": source_record,
+        "mapping": {
+            "gold": "source_candidate_id_with_content_and_identity_check",
+            "generated": "raw_position_with_group_and_source_id_check",
+            "canonicalization": "content_sha256_with_conflict_rejection",
+        },
+        "row_counts": {
+            "raw_candidates": expected_raw_rows,
+            "gold_candidates": expected_gold_rows,
+            "generated_candidates": expected_generated_rows,
+            "canonical_candidates": len(public_rows),
+            "mask_conflicts": 0,
+        },
+        "included_candidates_by_shadow": included_counts,
+        "shadow_masks_sha256": file_sha256(candidate_root / "shadow_masks.csv"),
+    }
+    candidate_manifest = read_json(candidate_root / "manifest.json")
+    if (
+        candidate_manifest.get("candidate_source_mode") != "baseline_mask_inheritance"
+        or candidate_manifest.get("mask_reuse") != expected_record
+    ):
+        raise ValueError("Candidate manifest is not bound to the baseline masks.")
+    return expected_record
+
+
 def validate_formal_outputs(
     cfg: DictConfig,
     *,
@@ -2335,8 +2396,14 @@ def validate_formal_outputs(
     command: str,
 ) -> None:
     strategy = fine_tuning_strategy(cfg)
-    if strategy.name != "lora" or not bool(cfg.reuse.enabled):
-        raise ValueError("This validation stage requires LoRA shadow-expansion reuse.")
+    reuse_enabled = bool(OmegaConf.select(cfg, "reuse.enabled", default=False))
+    mask_reuse_enabled = bool(
+        OmegaConf.select(cfg, "mask_reuse.enabled", default=False)
+    )
+    if strategy.name != "lora" or reuse_enabled == mask_reuse_enabled:
+        raise ValueError(
+            "This validation stage requires exactly one LoRA candidate reuse mode."
+        )
 
     root = model_root(cfg, project_root, smoke=False)
     expected_shadow_count = shadow_count(cfg, smoke=False)
@@ -2348,15 +2415,29 @@ def validate_formal_outputs(
         "evaluator_mapping": paths["private"],
         "shadow_masks": paths["masks"],
     }
+    expected_candidate_rows = {
+        "public_candidates": len(public_rows),
+        "evaluator_mapping": len(private_rows),
+        "shadow_models": expected_shadow_count,
+    }
+    if mask_reuse_enabled:
+        candidate_files.update(
+            {
+                "raw_public_candidates": paths["raw_public"],
+                "raw_private_provenance": paths["raw_private"],
+            }
+        )
+        expected_candidate_rows.update(
+            {
+                "raw_public_candidates": len(read_jsonl(paths["raw_public"])),
+                "raw_private_provenance": len(read_jsonl(paths["raw_private"])),
+            }
+        )
     if not _artifact_record_is_complete(
         cfg,
         paths["manifest"],
         candidate_files,
-        expected_row_counts={
-            "public_candidates": len(public_rows),
-            "evaluator_mapping": len(private_rows),
-            "shadow_models": expected_shadow_count,
-        },
+        expected_row_counts=expected_candidate_rows,
     ):
         raise ValueError("Candidate artifacts failed final manifest validation.")
 
@@ -2369,37 +2450,80 @@ def validate_formal_outputs(
             f"{expected_shadow_count}."
         )
 
-    source_candidates = (
-        project_root
-        / str(cfg.reuse.source_output_root)
-        / str(cfg.model.key)
-        / "candidates"
-    )
-    source_record = validate_lora_candidate_artifact(
-        source_candidates,
-        expected_model=str(cfg.model.name_or_path),
-        expected_tokenizer=str(cfg.model.name_or_path),
-        expected_seed=int(cfg.runtime.seed),
-        expected_shadow_count=int(cfg.reuse.expected_source_shadow_count),
-    )
-    candidate_manifest = read_json(paths["manifest"])
-    if (
-        candidate_manifest.get("candidate_source_mode")
-        != "exact_source_tables_new_masks"
-        or candidate_manifest.get("source_candidate_artifact") != source_record
-    ):
-        raise ValueError("Candidate manifest is not bound to the source tables.")
-    source_candidate_hashes = {
-        "public_candidates.jsonl": file_sha256(
-            source_candidates / "public_candidates.jsonl"
-        ),
-        "private_labels.jsonl": file_sha256(source_candidates / "private_labels.jsonl"),
-    }
-    if source_candidate_hashes != {
-        "public_candidates.jsonl": file_sha256(paths["public"]),
-        "private_labels.jsonl": file_sha256(paths["private"]),
-    }:
-        raise ValueError("Candidate text or evaluator labels changed from source run.")
+    lineage_experiment_artifacts: dict[str, str]
+    completion_lineage: dict[str, Any]
+    if reuse_enabled:
+        source_candidates = (
+            project_root
+            / str(cfg.reuse.source_output_root)
+            / str(cfg.model.key)
+            / "candidates"
+        )
+        source_record = validate_lora_candidate_artifact(
+            source_candidates,
+            expected_model=str(cfg.model.name_or_path),
+            expected_tokenizer=str(cfg.model.name_or_path),
+            expected_seed=int(cfg.runtime.seed),
+            expected_shadow_count=int(cfg.reuse.expected_source_shadow_count),
+        )
+        candidate_manifest = read_json(paths["manifest"])
+        if (
+            candidate_manifest.get("candidate_source_mode")
+            != "exact_source_tables_new_masks"
+            or candidate_manifest.get("source_candidate_artifact") != source_record
+        ):
+            raise ValueError("Candidate manifest is not bound to the source tables.")
+        source_candidate_hashes = {
+            "public_candidates.jsonl": file_sha256(
+                source_candidates / "public_candidates.jsonl"
+            ),
+            "private_labels.jsonl": file_sha256(
+                source_candidates / "private_labels.jsonl"
+            ),
+        }
+        if source_candidate_hashes != {
+            "public_candidates.jsonl": file_sha256(paths["public"]),
+            "private_labels.jsonl": file_sha256(paths["private"]),
+        }:
+            raise ValueError(
+                "Candidate text or evaluator labels changed from source run."
+            )
+        reuse_manifest = root / "reuse" / "manifest.json"
+        lineage_experiment_artifacts = {
+            "reuse_manifest": str(reuse_manifest.relative_to(project_root))
+        }
+        completion_lineage = {
+            "source_candidate_sha256": source_candidate_hashes,
+            "reuse_manifest_sha256": file_sha256(reuse_manifest),
+        }
+    else:
+        mask_reuse_record = _validate_mask_reuse_candidate_lineage(
+            cfg,
+            project_root=project_root,
+            candidate_root=paths["manifest"].parent,
+            public_rows=public_rows,
+            masks=masks,
+            expected_shadow_count=expected_shadow_count,
+        )
+        source_model_root = (
+            project_root / str(cfg.mask_reuse.source_output_root) / str(cfg.model.key)
+        )
+        lineage_experiment_artifacts = {
+            "source_candidate_manifest": str(
+                (source_model_root / "candidates" / "manifest.json").relative_to(
+                    project_root
+                )
+            ),
+            "source_generation_manifest": str(
+                (source_model_root / "generated" / "manifest.json").relative_to(
+                    project_root
+                )
+            ),
+        }
+        completion_lineage = {
+            "candidate_source_mode": "baseline_mask_inheritance",
+            "mask_reuse": mask_reuse_record,
+        }
 
     shadow_records = {}
     expected_shadow_names = {
@@ -2482,9 +2606,7 @@ def validate_formal_outputs(
         git_state=collect_git_state(project_root),
         environment=extended_environment(project_root),
         artifacts={
-            "reuse_manifest": str(
-                (root / "reuse" / "manifest.json").relative_to(project_root)
-            ),
+            **lineage_experiment_artifacts,
             "candidate_manifest": str(paths["manifest"].relative_to(project_root)),
             "attack_manifest": str(
                 (attack_dir / "manifest.json").relative_to(project_root)
@@ -2496,7 +2618,11 @@ def validate_formal_outputs(
             "outputs passed count, configuration, and SHA256 validation."
         ),
         achieved_purpose=True,
-        next_action="Compare the 100-shadow estimator with the prior five-shadow run.",
+        next_action=(
+            "Compare the 100-shadow estimator with the prior five-shadow run."
+            if reuse_enabled
+            else "Compare the 10-epoch run descriptively with the prior 1-epoch run."
+        ),
         wandb_run_id=_active_wandb_run_id(),
     )
     completion_manifest_path = root / "completion_manifest.json"
@@ -2506,9 +2632,8 @@ def validate_formal_outputs(
         "model": str(cfg.model.name_or_path),
         "shadow_models": expected_shadow_count,
         "candidate_rows": len(public_rows),
-        "source_candidate_sha256": source_candidate_hashes,
+        **completion_lineage,
         "candidate_manifest_sha256": file_sha256(paths["manifest"]),
-        "reuse_manifest_sha256": file_sha256(root / "reuse" / "manifest.json"),
         "shadow_artifact_sha256": shadow_records,
         "attack_artifact_sha256": {
             **{name: file_sha256(path) for name, path in attack_files.items()},
