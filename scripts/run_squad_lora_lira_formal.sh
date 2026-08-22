@@ -29,9 +29,10 @@ OUTPUT_ROOT=outputs/squad_lora_lira
 
 run_stage() {
   local stage=$1
-  local -a stage_overrides=()
   if [[ "$stage" == "attack" ]]; then
-    stage_overrides+=(attack.batch_size="$ATTACK_BATCH_SIZE")
+    export LLM_MIA_ATTACK_BATCH_SIZE="$ATTACK_BATCH_SIZE"
+  else
+    unset LLM_MIA_ATTACK_BATCH_SIZE
   fi
   printf '[%s] model=%s stage=%s start\n' "$(date --iso-8601=seconds)" "$model" "$stage"
   uv run python ./cli/squad_lora_rmia.py \
@@ -45,8 +46,7 @@ run_stage() {
     train.dataloader_num_workers="$DATALOADER_NUM_WORKERS" \
     eval.batch_size="$INFERENCE_BATCH_SIZE" \
     eval.generation_batch_size="$INFERENCE_BATCH_SIZE" \
-    generation.batch_size="$INFERENCE_BATCH_SIZE" \
-    "${stage_overrides[@]}"
+    generation.batch_size="$INFERENCE_BATCH_SIZE"
   printf '[%s] model=%s stage=%s complete\n' "$(date --iso-8601=seconds)" "$model" "$stage"
 }
 

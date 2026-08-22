@@ -15,6 +15,7 @@ from src.llm_mia.data import file_sha256, read_json, write_json, write_jsonl
 from src.llm_mia.workflow import (
     _build_reused_shadow_expansion_candidates,
     attack_metrics,
+    attack_scoring_batch_size,
 )
 
 
@@ -129,6 +130,19 @@ def test_lira_metrics_have_no_population_calibration() -> None:
     assert metrics["auc_gold_train_vs_gold_squad_validation"] == 1.0
     assert "population_calibration_examples" not in metrics
     assert "tpr_at_fpr_0.01_gold_train_vs_gold_squad_validation" in metrics
+
+
+def test_attack_scoring_batch_size_uses_runtime_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = OmegaConf.create({"attack": {"batch_size": 96}})
+
+    assert attack_scoring_batch_size(cfg) == 96
+    monkeypatch.setenv("LLM_MIA_ATTACK_BATCH_SIZE", "32")
+    assert attack_scoring_batch_size(cfg) == 32
+    monkeypatch.setenv("LLM_MIA_ATTACK_BATCH_SIZE", "0")
+    with pytest.raises(ValueError, match="must be positive"):
+        attack_scoring_batch_size(cfg)
 
 
 def _write_source_candidates(root: Path) -> bytes:

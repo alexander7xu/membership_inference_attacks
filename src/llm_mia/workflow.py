@@ -4,6 +4,7 @@ import gc
 import json
 import logging
 import math
+import os
 import shutil
 from contextvars import ContextVar
 from copy import deepcopy
@@ -2194,6 +2195,14 @@ def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> 
     )
 
 
+def attack_scoring_batch_size(cfg: DictConfig) -> int:
+    configured = os.environ.get("LLM_MIA_ATTACK_BATCH_SIZE", cfg.attack.batch_size)
+    batch_size = int(configured)
+    if batch_size <= 0:
+        raise ValueError("Attack scoring batch size must be positive.")
+    return batch_size
+
+
 def run_attack(
     cfg: DictConfig,
     *,
@@ -2203,6 +2212,7 @@ def run_attack(
 ) -> None:
     train_shadows(cfg, project_root=project_root, command=command, smoke=smoke)
     method = attack_method(cfg)
+    scoring_batch_size = attack_scoring_batch_size(cfg)
     run_dir = model_root(cfg, project_root, smoke=smoke) / "attack"
     metrics_path = run_dir / "metrics.json"
     paths = candidate_paths(cfg, project_root, smoke=smoke)
@@ -2238,7 +2248,7 @@ def run_attack(
         cfg,
         candidates,
         checkpoint_path=target_checkpoint,
-        batch_size=int(cfg.attack.batch_size),
+        batch_size=scoring_batch_size,
     )
     shadow_checkpoints = shadow_checkpoint_paths(cfg, project_root, smoke=smoke)
     shadow_scores = [
@@ -2246,7 +2256,7 @@ def run_attack(
             cfg,
             candidates,
             checkpoint_path=checkpoint,
-            batch_size=int(cfg.attack.batch_size),
+            batch_size=scoring_batch_size,
         )
         for checkpoint in shadow_checkpoints
     ]
@@ -2265,6 +2275,7 @@ def run_attack(
     calibration_scores: list[float] | None = None
     manifest_details: dict[str, Any] = {
         "attack_method": method,
+        "scoring_batch_size": scoring_batch_size,
         "source_mask_sha256": file_sha256(paths["masks"]),
     }
     if method == "online_lira_fixed_variance":
@@ -2320,14 +2331,14 @@ def run_attack(
             cfg,
             population,
             checkpoint_path=target_checkpoint,
-            batch_size=int(cfg.attack.batch_size),
+            batch_size=scoring_batch_size,
         )
         population_shadows = [
             score_with_checkpoint(
                 cfg,
                 population,
                 checkpoint_path=checkpoint,
-                batch_size=int(cfg.attack.batch_size),
+                batch_size=scoring_batch_size,
             )
             for checkpoint in shadow_checkpoints
         ]

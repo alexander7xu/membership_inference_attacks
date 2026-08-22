@@ -9,7 +9,7 @@ def test_lira_formal_runner_uses_separate_safe_attack_batch() -> None:
     assert 'eval.batch_size="$INFERENCE_BATCH_SIZE"' in script
     assert 'generation.batch_size="$INFERENCE_BATCH_SIZE"' in script
     assert 'if [[ "$stage" == "attack" ]]' in script
-    assert 'stage_overrides+=(attack.batch_size="$ATTACK_BATCH_SIZE")' in script
-    assert '"${stage_overrides[@]}"' in script
-    assert script.count('attack.batch_size="$ATTACK_BATCH_SIZE"') == 1
+    assert 'export LLM_MIA_ATTACK_BATCH_SIZE="$ATTACK_BATCH_SIZE"' in script
+    assert "unset LLM_MIA_ATTACK_BATCH_SIZE" in script
+    assert "attack.batch_size=" not in script
     assert 'attack.batch_size="$INFERENCE_BATCH_SIZE"' not in script
