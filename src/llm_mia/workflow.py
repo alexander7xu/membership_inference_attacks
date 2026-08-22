@@ -27,8 +27,11 @@ from src.experiment import (
 from src.llm_mia.analysis import (
     bootstrap_binary_metrics,
     candidate_relative_loglikelihood,
+    fixed_variance_lira_parameters,
+    online_lira_fixed_variance_score,
     online_rmia_score,
     population_relative_loglikelihood,
+    tpr_at_fpr,
 )
 from src.llm_mia.data import (
     QARecord,
@@ -71,6 +74,7 @@ from src.llm_mia.plotting import (
     candidate_groups_for_variant,
     plot_group_feature_ecdf,
     sample_group_candidates,
+    sample_group_feature_rows,
     summarize_group_features,
 )
 from src.llm_mia.reuse import (
@@ -149,6 +153,10 @@ def run_stage(cfg: DictConfig, *, command: str) -> None:
             plot_rmia_feature_distribution(
                 cfg, project_root=project_root, command=command
             )
+        elif stage == "plot_lira_feature":
+            plot_lira_feature_distribution(
+                cfg, project_root=project_root, command=command
+            )
         else:
             raise ValueError(f"Unknown workflow.stage: {stage}")
     finally:
@@ -192,6 +200,41 @@ def model_root(cfg: DictConfig, project_root: Path, *, smoke: bool) -> Path:
         / profile_name(cfg, smoke)
         / str(cfg.model.key)
     )
+
+
+def attack_method(cfg: DictConfig) -> str:
+    method = str(OmegaConf.select(cfg, "attack.method", default="online_rmia"))
+    if method not in {"online_rmia", "online_lira_fixed_variance"}:
+        raise ValueError(f"Unsupported text attack method: {method}")
+    return method
+
+
+def attack_score_filename(cfg: DictConfig) -> str:
+    if attack_method(cfg) == "online_lira_fixed_variance":
+        return "online_lira_scores.jsonl"
+    return "online_rmia_scores.jsonl"
+
+
+def attack_score_field(cfg: DictConfig) -> str:
+    if attack_method(cfg) == "online_lira_fixed_variance":
+        return "online_lira_log_ratio"
+    return "online_rmia_score"
+
+
+def attack_expected_row_counts(
+    cfg: DictConfig, *, candidate_rows: int, smoke: bool
+) -> dict[str, int]:
+    row_counts = {
+        "candidates": candidate_rows,
+        "shadow_models": shadow_count(cfg, smoke),
+    }
+    if attack_method(cfg) == "online_rmia":
+        row_counts["population"] = (
+            candidate_limit(cfg, smoke)
+            if smoke
+            else int(cfg.data.squad_validation_population_size)
+        )
+    return row_counts
 
 
 def target_checkpoint_path(cfg: DictConfig, project_root: Path, *, smoke: bool) -> Path:
@@ -1818,10 +1861,21 @@ def _build_reused_shadow_expansion_candidates(
         "evaluator_mapping": paths["private"],
         "shadow_masks": paths["masks"],
     }
+    mask_mode = str(OmegaConf.select(cfg, "reuse.mask_mode", default="new"))
+    if mask_mode not in {"new", "exact_source"}:
+        raise ValueError(f"Unsupported candidate mask reuse mode: {mask_mode}")
+    if mask_mode == "exact_source" and int(
+        cfg.reuse.expected_source_shadow_count
+    ) != shadow_count(cfg, smoke=False):
+        raise ValueError(
+            "exact_source requires equal source and destination shadow counts."
+        )
     source_files = {
         "public_candidates": source_root / "public_candidates.jsonl",
         "evaluator_mapping": source_root / "private_labels.jsonl",
     }
+    if mask_mode == "exact_source":
+        source_files["shadow_masks"] = source_root / "shadow_masks.csv"
 
     if paths["manifest"].exists() and not bool(cfg.workflow.force):
         public_rows = read_jsonl(paths["public"]) if paths["public"].is_file() else []
@@ -1870,6 +1924,8 @@ def _build_reused_shadow_expansion_candidates(
             path.unlink()
     shutil.copy2(source_files["public_candidates"], paths["public"])
     shutil.copy2(source_files["evaluator_mapping"], paths["private"])
+    if mask_mode == "exact_source":
+        shutil.copy2(source_files["shadow_masks"], paths["masks"])
     for name, source in source_files.items():
         if file_sha256(source) != file_sha256(artifact_files[name]):
             raise ValueError(
@@ -1879,13 +1935,14 @@ def _build_reused_shadow_expansion_candidates(
     public_rows = read_jsonl(paths["public"])
     private_rows = read_jsonl(paths["private"])
     candidate_ids = [str(row["candidate_id"]) for row in public_rows]
-    write_shadow_masks(
-        paths["masks"],
-        candidate_ids,
-        seed=int(cfg.runtime.seed) + int(cfg.shadow.seed_offset),
-        shadow_count=shadow_count(cfg, smoke=False),
-        inclusion_probability=float(cfg.shadow.inclusion_probability),
-    )
+    if mask_mode != "exact_source":
+        write_shadow_masks(
+            paths["masks"],
+            candidate_ids,
+            seed=int(cfg.runtime.seed) + int(cfg.shadow.seed_offset),
+            shadow_count=shadow_count(cfg, smoke=False),
+            inclusion_probability=float(cfg.shadow.inclusion_probability),
+        )
     manifest = artifact_manifest(
         cfg,
         project_root,
@@ -1896,7 +1953,11 @@ def _build_reused_shadow_expansion_candidates(
             "shadow_models": shadow_count(cfg, smoke=False),
         },
     )
-    manifest["candidate_source_mode"] = "exact_source_tables_new_masks"
+    manifest["candidate_source_mode"] = (
+        "exact_source_tables_exact_masks"
+        if mask_mode == "exact_source"
+        else "exact_source_tables_new_masks"
+    )
     manifest["source_candidate_artifact"] = source_record
     write_json(paths["manifest"], manifest)
     _log_wandb_stage(
@@ -2141,10 +2202,11 @@ def run_attack(
     smoke: bool,
 ) -> None:
     train_shadows(cfg, project_root=project_root, command=command, smoke=smoke)
+    method = attack_method(cfg)
     run_dir = model_root(cfg, project_root, smoke=smoke) / "attack"
     metrics_path = run_dir / "metrics.json"
     paths = candidate_paths(cfg, project_root, smoke=smoke)
-    scores_path = run_dir / "online_rmia_scores.jsonl"
+    scores_path = run_dir / attack_score_filename(cfg)
     manifest_path = run_dir / "manifest.json"
     experiment_path = run_dir / str(cfg.report.experiment_filename)
     if any(
@@ -2155,18 +2217,14 @@ def run_attack(
             cfg,
             manifest_path,
             {"scores": scores_path, "metrics": metrics_path},
-            expected_row_counts={
-                "candidates": len(candidate_rows),
-                "population": (
-                    candidate_limit(cfg, smoke)
-                    if smoke
-                    else int(cfg.data.squad_validation_population_size)
-                ),
-                "shadow_models": shadow_count(cfg, smoke),
-            },
+            expected_row_counts=attack_expected_row_counts(
+                cfg, candidate_rows=len(candidate_rows), smoke=smoke
+            ),
         ):
-            LOGGER.info("Reusing attack outputs: %s", metrics_path)
-            return
+            prior_manifest = read_json(manifest_path)
+            if prior_manifest.get("attack_method", "online_rmia") == method:
+                LOGGER.info("Reusing attack outputs: %s", metrics_path)
+                return
         raise ValueError(
             "Existing attack outputs do not match the current configuration. "
             "Use workflow.force=true only to intentionally rebuild them."
@@ -2182,17 +2240,16 @@ def run_attack(
         checkpoint_path=target_checkpoint,
         batch_size=int(cfg.attack.batch_size),
     )
-    shadow_scores = []
     shadow_checkpoints = shadow_checkpoint_paths(cfg, project_root, smoke=smoke)
-    for checkpoint in shadow_checkpoints:
-        shadow_scores.append(
-            score_with_checkpoint(
-                cfg,
-                candidates,
-                checkpoint_path=checkpoint,
-                batch_size=int(cfg.attack.batch_size),
-            )
+    shadow_scores = [
+        score_with_checkpoint(
+            cfg,
+            candidates,
+            checkpoint_path=checkpoint,
+            batch_size=int(cfg.attack.batch_size),
         )
+        for checkpoint in shadow_checkpoints
+    ]
     if len(target_scores) != len(public_rows) or any(
         len(scores) != len(public_rows) for scores in shadow_scores
     ):
@@ -2200,98 +2257,145 @@ def run_attack(
             "Candidate score count does not match the public candidate table."
         )
 
-    population = load_split_file(cfg, project_root, "squad_validation_population")
-    if smoke:
-        population = deterministic_subset(
-            population,
-            seed=int(cfg.runtime.seed),
-            limit=candidate_limit(cfg, smoke),
-            namespace="smoke_population",
+    per_candidate_shadow_scores = [
+        [scores[row_index] for scores in shadow_scores]
+        for row_index in range(len(public_rows))
+    ]
+    candidate_masks = [masks[str(row["candidate_id"])] for row in public_rows]
+    calibration_scores: list[float] | None = None
+    manifest_details: dict[str, Any] = {
+        "attack_method": method,
+        "source_mask_sha256": file_sha256(paths["masks"]),
+    }
+    if method == "online_lira_fixed_variance":
+        (
+            in_means,
+            out_means,
+            in_variance,
+            out_variance,
+            in_degrees,
+            out_degrees,
+        ) = fixed_variance_lira_parameters(per_candidate_shadow_scores, candidate_masks)
+        score_rows = []
+        for row_index, public_row in enumerate(public_rows):
+            mask = candidate_masks[row_index]
+            score_rows.append(
+                {
+                    "candidate_id": public_row["candidate_id"],
+                    "target_mean_logprob": target_scores[row_index],
+                    "shadow_in_mean_logprob": in_means[row_index],
+                    "shadow_out_mean_logprob": out_means[row_index],
+                    "pooled_in_variance": in_variance,
+                    "pooled_out_variance": out_variance,
+                    "online_lira_log_ratio": online_lira_fixed_variance_score(
+                        target_scores[row_index],
+                        in_means[row_index],
+                        out_means[row_index],
+                        in_variance,
+                        out_variance,
+                    ),
+                    "num_in_shadows": int(sum(mask)),
+                    "num_out_shadows": int(len(mask) - sum(mask)),
+                }
+            )
+        manifest_details.update(
+            {
+                "variance_estimator": "pooled_within_candidate_unbiased",
+                "pooled_in_variance": in_variance,
+                "pooled_out_variance": out_variance,
+                "in_variance_degrees_of_freedom": in_degrees,
+                "out_variance_degrees_of_freedom": out_degrees,
+            }
         )
-    population_target = score_with_checkpoint(
-        cfg,
-        population,
-        checkpoint_path=target_checkpoint,
-        batch_size=int(cfg.attack.batch_size),
-    )
-    population_shadows = []
-    for checkpoint in shadow_checkpoints:
-        population_shadows.append(
+    else:
+        population = load_split_file(cfg, project_root, "squad_validation_population")
+        if smoke:
+            population = deterministic_subset(
+                population,
+                seed=int(cfg.runtime.seed),
+                limit=candidate_limit(cfg, smoke),
+                namespace="smoke_population",
+            )
+        population_target = score_with_checkpoint(
+            cfg,
+            population,
+            checkpoint_path=target_checkpoint,
+            batch_size=int(cfg.attack.batch_size),
+        )
+        population_shadows = [
             score_with_checkpoint(
                 cfg,
                 population,
                 checkpoint_path=checkpoint,
                 batch_size=int(cfg.attack.batch_size),
             )
-        )
-    population_relative = [
-        population_relative_loglikelihood(
-            population_target[row_index],
-            [scores[row_index] for scores in population_shadows],
-        )
-        for row_index in range(len(population))
-    ]
+            for checkpoint in shadow_checkpoints
+        ]
+        population_relative = [
+            population_relative_loglikelihood(
+                population_target[row_index],
+                [scores[row_index] for scores in population_shadows],
+            )
+            for row_index in range(len(population))
+        ]
+        score_rows = []
+        for row_index, public_row in enumerate(public_rows):
+            mask = candidate_masks[row_index]
+            relative, in_mean, out_mean = candidate_relative_loglikelihood(
+                target_scores[row_index],
+                per_candidate_shadow_scores[row_index],
+                mask,
+            )
+            score_rows.append(
+                {
+                    "candidate_id": public_row["candidate_id"],
+                    "target_mean_logprob": target_scores[row_index],
+                    "shadow_in_mean_logprob": in_mean,
+                    "shadow_out_mean_logprob": out_mean,
+                    "relative_log_likelihood": relative,
+                    "online_rmia_score": online_rmia_score(
+                        relative, population_relative, gamma=float(cfg.attack.gamma)
+                    ),
+                    "num_in_shadows": int(sum(mask)),
+                    "num_out_shadows": int(len(mask) - sum(mask)),
+                }
+            )
+        calibration_scores = [
+            online_rmia_score(
+                value,
+                [
+                    other
+                    for index, other in enumerate(population_relative)
+                    if index != row_index
+                ],
+                gamma=float(cfg.attack.gamma),
+            )
+            for row_index, value in enumerate(population_relative)
+        ]
 
-    score_rows = []
-    for row_index, public_row in enumerate(public_rows):
-        candidate_id_value = public_row["candidate_id"]
-        per_shadow = [scores[row_index] for scores in shadow_scores]
-        relative, in_mean, out_mean = candidate_relative_loglikelihood(
-            target_scores[row_index], per_shadow, masks[candidate_id_value]
-        )
-        score_rows.append(
-            {
-                "candidate_id": candidate_id_value,
-                "target_mean_logprob": target_scores[row_index],
-                "shadow_in_mean_logprob": in_mean,
-                "shadow_out_mean_logprob": out_mean,
-                "relative_log_likelihood": relative,
-                "online_rmia_score": online_rmia_score(
-                    relative, population_relative, gamma=float(cfg.attack.gamma)
-                ),
-                "num_in_shadows": int(sum(masks[candidate_id_value])),
-                "num_out_shadows": int(
-                    len(masks[candidate_id_value]) - sum(masks[candidate_id_value])
-                ),
-            }
-        )
     write_jsonl(scores_path, score_rows)
-
-    population_rmia_scores = [
-        online_rmia_score(
-            value,
-            [
-                other
-                for index, other in enumerate(population_relative)
-                if index != row_index
-            ],
-            gamma=float(cfg.attack.gamma),
-        )
-        for row_index, value in enumerate(population_relative)
-    ]
     private_rows = read_jsonl(paths["private"])
     metrics = attack_metrics(
         score_rows,
         private_rows,
-        calibration_scores=population_rmia_scores,
+        score_field=attack_score_field(cfg),
+        calibration_scores=calibration_scores,
         fpr_thresholds=list(cfg.attack.fpr_thresholds),
         bootstrap_samples=int(cfg.attack.bootstrap_samples),
         seed=int(cfg.runtime.seed),
+        include_point_tpr=method == "online_lira_fixed_variance",
     )
     write_json(metrics_path, metrics)
-    write_json(
-        manifest_path,
-        artifact_manifest(
-            cfg,
-            project_root,
-            {"scores": scores_path, "metrics": metrics_path},
-            row_counts={
-                "candidates": len(score_rows),
-                "population": len(population),
-                "shadow_models": shadow_count(cfg, smoke),
-            },
+    manifest = artifact_manifest(
+        cfg,
+        project_root,
+        {"scores": scores_path, "metrics": metrics_path},
+        row_counts=attack_expected_row_counts(
+            cfg, candidate_rows=len(score_rows), smoke=smoke
         ),
     )
+    manifest.update(manifest_details)
+    write_json(manifest_path, manifest)
     tracking_artifacts = _log_wandb_stage(
         stage="attack",
         metrics={key: value for key, value in metrics.items() if _is_number(value)},
@@ -2301,9 +2405,14 @@ def run_attack(
             "manifest": manifest_path,
         },
     )
+    attack_label = (
+        "fixed-variance online LiRA"
+        if method == "online_lira_fixed_variance"
+        else "online RMIA"
+    )
     write_experiment_markdown(
-        run_dir / str(cfg.report.experiment_filename),
-        purpose=f"Analyze text-only RMIA score distributions for {cfg.model.display_name}.",
+        experiment_path,
+        purpose=f"Analyze text-only {attack_label} scores for {cfg.model.display_name}.",
         hypothesis=str(cfg.experiment.hypothesis),
         command=command,
         overrides=[],
@@ -2396,6 +2505,7 @@ def validate_formal_outputs(
     command: str,
 ) -> None:
     strategy = fine_tuning_strategy(cfg)
+    method = attack_method(cfg)
     reuse_enabled = bool(OmegaConf.select(cfg, "reuse.enabled", default=False))
     mask_reuse_enabled = bool(
         OmegaConf.select(cfg, "mask_reuse.enabled", default=False)
@@ -2466,10 +2576,15 @@ def validate_formal_outputs(
             expected_seed=int(cfg.runtime.seed),
             expected_shadow_count=int(cfg.reuse.expected_source_shadow_count),
         )
+        mask_mode = str(OmegaConf.select(cfg, "reuse.mask_mode", default="new"))
+        expected_source_mode = (
+            "exact_source_tables_exact_masks"
+            if mask_mode == "exact_source"
+            else "exact_source_tables_new_masks"
+        )
         candidate_manifest = read_json(paths["manifest"])
         if (
-            candidate_manifest.get("candidate_source_mode")
-            != "exact_source_tables_new_masks"
+            candidate_manifest.get("candidate_source_mode") != expected_source_mode
             or candidate_manifest.get("source_candidate_artifact") != source_record
         ):
             raise ValueError("Candidate manifest is not bound to the source tables.")
@@ -2481,12 +2596,20 @@ def validate_formal_outputs(
                 source_candidates / "private_labels.jsonl"
             ),
         }
-        if source_candidate_hashes != {
+        destination_candidate_hashes = {
             "public_candidates.jsonl": file_sha256(paths["public"]),
             "private_labels.jsonl": file_sha256(paths["private"]),
-        }:
+        }
+        if mask_mode == "exact_source":
+            source_candidate_hashes["shadow_masks.csv"] = file_sha256(
+                source_candidates / "shadow_masks.csv"
+            )
+            destination_candidate_hashes["shadow_masks.csv"] = file_sha256(
+                paths["masks"]
+            )
+        if source_candidate_hashes != destination_candidate_hashes:
             raise ValueError(
-                "Candidate text or evaluator labels changed from source run."
+                "Candidate text, evaluator labels, or exact source masks changed."
             )
         reuse_manifest = root / "reuse" / "manifest.json"
         lineage_experiment_artifacts = {
@@ -2570,23 +2693,75 @@ def validate_formal_outputs(
 
     attack_dir = root / "attack"
     attack_files = {
-        "scores": attack_dir / "online_rmia_scores.jsonl",
+        "scores": attack_dir / attack_score_filename(cfg),
         "metrics": attack_dir / "metrics.json",
     }
+    attack_manifest_path = attack_dir / "manifest.json"
     if (
         not _artifact_record_is_complete(
             cfg,
-            attack_dir / "manifest.json",
+            attack_manifest_path,
             attack_files,
-            expected_row_counts={
-                "candidates": len(public_rows),
-                "population": int(cfg.data.squad_validation_population_size),
-                "shadow_models": expected_shadow_count,
-            },
+            expected_row_counts=attack_expected_row_counts(
+                cfg, candidate_rows=len(public_rows), smoke=False
+            ),
         )
         or not (attack_dir / str(cfg.report.experiment_filename)).is_file()
     ):
         raise ValueError("Attack artifacts failed final manifest validation.")
+    attack_manifest = read_json(attack_manifest_path)
+    if attack_manifest.get("attack_method", "online_rmia") != method:
+        raise ValueError("Attack manifest method does not match the configuration.")
+    if method == "online_lira_fixed_variance":
+        if attack_manifest.get(
+            "variance_estimator"
+        ) != "pooled_within_candidate_unbiased" or attack_manifest.get(
+            "source_mask_sha256"
+        ) != file_sha256(paths["masks"]):
+            raise ValueError("LiRA variance or source-mask lineage is invalid.")
+        scores = read_jsonl(attack_files["scores"])
+        if len(scores) != len(public_rows) or any(
+            not math.isfinite(float(row["online_lira_log_ratio"])) for row in scores
+        ):
+            raise ValueError("LiRA scores are missing or non-finite.")
+
+    analysis_artifact_sha256: dict[str, str] = {}
+    if method == "online_lira_fixed_variance":
+        analysis_dir = root / "analysis" / "online_lira_log_ratio"
+        analysis_files = {
+            "figure": analysis_dir / "online_lira_log_ratio_ecdf.png",
+            "sampled_candidates": analysis_dir / "sampled_candidates.jsonl",
+            "summary": analysis_dir / "summary.json",
+        }
+        group_order = tuple(
+            dict.fromkeys(str(row["private_group"]) for row in private_rows)
+        )
+        sample_size = int(cfg.analysis.sample_size_per_group)
+        if (
+            not _artifact_record_is_complete(
+                cfg,
+                analysis_dir / "manifest.json",
+                analysis_files,
+                expected_row_counts={
+                    "total": sample_size * len(group_order),
+                    **{group: sample_size for group in group_order},
+                },
+            )
+            or not (analysis_dir / str(cfg.report.experiment_filename)).is_file()
+        ):
+            raise ValueError("LiRA analysis artifacts failed final validation.")
+        analysis_manifest = read_json(analysis_dir / "manifest.json")
+        if analysis_manifest.get("attack_method") != method or analysis_manifest.get(
+            "source_scores_sha256"
+        ) != file_sha256(attack_files["scores"]):
+            raise ValueError("LiRA analysis lineage does not match the attack scores.")
+        analysis_artifact_sha256 = {
+            **{name: file_sha256(path) for name, path in analysis_files.items()},
+            "manifest": file_sha256(analysis_dir / "manifest.json"),
+            "experiment": file_sha256(
+                analysis_dir / str(cfg.report.experiment_filename)
+            ),
+        }
 
     attack_metrics = read_json(attack_dir / "metrics.json")
     summary_metrics = {
@@ -2596,7 +2771,7 @@ def validate_formal_outputs(
     write_experiment_markdown(
         experiment_path,
         purpose=(
-            f"Complete the {expected_shadow_count}-shadow online RMIA run for "
+            f"Complete the {expected_shadow_count}-shadow {method} run for "
             f"{cfg.model.display_name}."
         ),
         hypothesis=str(cfg.experiment.hypothesis),
@@ -2619,7 +2794,9 @@ def validate_formal_outputs(
         ),
         achieved_purpose=True,
         next_action=(
-            "Compare the 100-shadow estimator with the prior five-shadow run."
+            "Compare LiRA descriptively with the prior RMIA run; safe filler replacements prevent strict attack-only attribution."
+            if method == "online_lira_fixed_variance"
+            else "Compare the 100-shadow estimator with the prior five-shadow run."
             if reuse_enabled
             else "Compare the 10-epoch run descriptively with the prior 1-epoch run."
         ),
@@ -2630,6 +2807,7 @@ def validate_formal_outputs(
         "config_sha256": config_fingerprint(_resolved_config(cfg)),
         "semantic_config_sha256": _semantic_config_fingerprint(_resolved_config(cfg)),
         "model": str(cfg.model.name_or_path),
+        "attack_method": method,
         "shadow_models": expected_shadow_count,
         "candidate_rows": len(public_rows),
         **completion_lineage,
@@ -2640,6 +2818,7 @@ def validate_formal_outputs(
             "manifest": file_sha256(attack_dir / "manifest.json"),
             "experiment": file_sha256(attack_dir / str(cfg.report.experiment_filename)),
         },
+        "analysis_artifact_sha256": analysis_artifact_sha256,
         "experiment_sha256": file_sha256(experiment_path),
     }
     write_json(completion_manifest_path, completion_manifest)
@@ -2987,6 +3166,116 @@ def plot_rmia_feature_distribution(
     )
 
 
+def plot_lira_feature_distribution(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    command: str,
+) -> None:
+    if attack_method(cfg) != "online_lira_fixed_variance":
+        raise ValueError("The LiRA plot stage requires online_lira_fixed_variance.")
+    feature = str(cfg.analysis.feature)
+    if feature != "online_lira_log_ratio":
+        raise ValueError("The LiRA plot stage requires online_lira_log_ratio.")
+
+    root = model_root(cfg, project_root, smoke=False)
+    candidate = candidate_paths(cfg, project_root, smoke=False)
+    score_path = root / "attack" / attack_score_filename(cfg)
+    score_rows = read_jsonl(score_path)
+    private_rows = read_jsonl(candidate["private"])
+    group_order = tuple(
+        dict.fromkeys(str(row["private_group"]) for row in private_rows)
+    )
+    sampled_rows = sample_group_feature_rows(
+        score_rows,
+        private_rows,
+        feature=feature,
+        sample_size=int(cfg.analysis.sample_size_per_group),
+        seed=int(cfg.analysis.sampling_seed),
+        group_order=group_order,
+    )
+    summaries = summarize_group_features(
+        sampled_rows, feature=feature, group_order=group_order
+    )
+    output_dir = root / "analysis" / feature
+    figure_path = output_dir / "online_lira_log_ratio_ecdf.png"
+    sampled_path = output_dir / "sampled_candidates.jsonl"
+    summary_path = output_dir / "summary.json"
+    manifest_path = output_dir / "manifest.json"
+    experiment_path = output_dir / str(cfg.report.experiment_filename)
+    write_jsonl(sampled_path, sampled_rows)
+    write_json(summary_path, summaries)
+    plot_group_feature_ecdf(
+        sampled_rows,
+        feature=feature,
+        model_display_name=str(cfg.model.display_name),
+        output_path=figure_path,
+        dpi=int(cfg.analysis.figure_dpi),
+        group_order=group_order,
+        title="Fixed-variance online LiRA score distributions",
+        x_label="LiRA log-likelihood ratio (IN minus OUT)",
+    )
+    artifacts = {
+        "figure": figure_path,
+        "sampled_candidates": sampled_path,
+        "summary": summary_path,
+    }
+    manifest = artifact_manifest(
+        cfg,
+        project_root,
+        artifacts,
+        row_counts={
+            "total": len(sampled_rows),
+            **{
+                group: sum(row["private_group"] == group for row in sampled_rows)
+                for group in group_order
+            },
+        },
+    )
+    manifest.update(
+        {
+            "attack_method": attack_method(cfg),
+            "feature": feature,
+            "group_order": list(group_order),
+            "sample_size_per_group": int(cfg.analysis.sample_size_per_group),
+            "source_scores_sha256": file_sha256(score_path),
+            "source_private_labels_sha256": file_sha256(candidate["private"]),
+        }
+    )
+    write_json(manifest_path, manifest)
+    metrics = {
+        f"{group}_{name}": value
+        for group, summary in summaries.items()
+        for name, value in summary.items()
+        if name in {"count", "mean", "median"}
+    }
+    tracking_artifacts = _log_wandb_stage(
+        stage="lira_feature_plot",
+        metrics=metrics,
+        paths={**artifacts, "manifest": manifest_path},
+    )
+    write_experiment_markdown(
+        experiment_path,
+        purpose=f"Compare fixed-variance LiRA score distributions for {cfg.model.display_name}.",
+        hypothesis=str(cfg.experiment.hypothesis),
+        command=command,
+        overrides=[],
+        config_fingerprint_value=config_fingerprint(_resolved_config(cfg)),
+        git_state=collect_git_state(project_root),
+        environment=extended_environment(project_root),
+        artifacts={
+            **{name: str(path) for name, path in artifacts.items()},
+            "manifest": str(manifest_path),
+            **tracking_artifacts,
+        },
+        metrics=metrics,
+        conclusion="The ECDF uses an equal-size deterministic sample from each available candidate group.",
+        achieved_purpose=True,
+        next_action="Interpret LiRA separation together with per-group AUC and low-FPR TPR.",
+        wandb_run_id=_active_wandb_run_id(),
+    )
+
+
 def score_with_checkpoint(
     cfg: DictConfig,
     candidates: list[QARecord],
@@ -3015,14 +3304,22 @@ def attack_metrics(
     score_rows: list[dict[str, Any]],
     private_rows: list[dict[str, Any]],
     *,
-    calibration_scores: list[float],
+    score_field: str = "online_rmia_score",
+    calibration_scores: list[float] | None,
     fpr_thresholds: list[float],
     bootstrap_samples: int,
     seed: int,
+    include_point_tpr: bool = False,
 ) -> dict[str, float]:
-    score_by_id = {
-        row["candidate_id"]: float(row["online_rmia_score"]) for row in score_rows
-    }
+    score_by_id = {}
+    for row in score_rows:
+        candidate_id_value = str(row["candidate_id"])
+        value = float(row[score_field])
+        if candidate_id_value in score_by_id:
+            raise ValueError(f"Duplicate scored candidate: {candidate_id_value}")
+        if not math.isfinite(value):
+            raise ValueError(f"Non-finite attack score: {candidate_id_value}")
+        score_by_id[candidate_id_value] = value
     labels_by_id: dict[str, int] = {}
     candidate_ids_by_group: dict[str, set[str]] = {}
     for row in private_rows:
@@ -3048,24 +3345,24 @@ def attack_metrics(
         )
         if labels_by_id[candidate_id_value] == 1
     )
-    metrics: dict[str, float] = {
-        "population_calibration_examples": float(len(calibration_scores))
-    }
-    for target_fpr in fpr_thresholds:
-        threshold = threshold_for_fpr(calibration_scores, target_fpr)
-        metrics[f"threshold_at_population_fpr_{target_fpr}"] = threshold
-        metrics[f"tpr_gold_train_at_population_fpr_{target_fpr}"] = fraction_above(
-            [score_by_id[cid] for cid in positives], threshold
-        )
-        for group, group_candidate_ids in sorted(candidate_ids_by_group.items()):
-            negatives = sorted(
-                candidate_id_value
-                for candidate_id_value in group_candidate_ids
-                if labels_by_id[candidate_id_value] == 0
+    metrics: dict[str, float] = {}
+    if calibration_scores is not None:
+        metrics["population_calibration_examples"] = float(len(calibration_scores))
+        for target_fpr in fpr_thresholds:
+            threshold = threshold_for_fpr(calibration_scores, target_fpr)
+            metrics[f"threshold_at_population_fpr_{target_fpr}"] = threshold
+            metrics[f"tpr_gold_train_at_population_fpr_{target_fpr}"] = fraction_above(
+                [score_by_id[cid] for cid in positives], threshold
             )
-            metrics[f"fpr_{group}_at_population_fpr_{target_fpr}"] = fraction_above(
-                [score_by_id[cid] for cid in negatives], threshold
-            )
+            for group, group_candidate_ids in sorted(candidate_ids_by_group.items()):
+                negatives = sorted(
+                    candidate_id_value
+                    for candidate_id_value in group_candidate_ids
+                    if labels_by_id[candidate_id_value] == 0
+                )
+                metrics[f"fpr_{group}_at_population_fpr_{target_fpr}"] = fraction_above(
+                    [score_by_id[cid] for cid in negatives], threshold
+                )
     for group, group_candidate_ids in sorted(candidate_ids_by_group.items()):
         negatives = sorted(
             candidate_id_value
@@ -3073,15 +3370,22 @@ def attack_metrics(
             if labels_by_id[candidate_id_value] == 0
         )
         if positives and negatives:
+            positive_scores = [score_by_id[cid] for cid in positives]
+            negative_scores = [score_by_id[cid] for cid in negatives]
             y_true = [1] * len(positives) + [0] * len(negatives)
-            values = [score_by_id[cid] for cid in positives + negatives]
+            values = positive_scores + negative_scores
             metrics[f"auc_gold_train_vs_{group}"] = float(roc_auc_score(y_true, values))
+            if include_point_tpr:
+                for target_fpr in fpr_thresholds:
+                    metrics[f"tpr_at_fpr_{target_fpr}_gold_train_vs_{group}"] = (
+                        tpr_at_fpr(values, y_true, target_fpr)
+                    )
             metrics.update(
                 {
                     f"{key}_gold_train_vs_{group}": value
                     for key, value in bootstrap_binary_metrics(
-                        [score_by_id[cid] for cid in positives],
-                        [score_by_id[cid] for cid in negatives],
+                        positive_scores,
+                        negative_scores,
                         fpr_thresholds=fpr_thresholds,
                         samples=bootstrap_samples,
                         seed=seed + sum(ord(char) for char in group),

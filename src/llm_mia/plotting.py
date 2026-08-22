@@ -34,6 +34,7 @@ FULLFT_CANDIDATE_GROUPS = candidate_groups_for_variant("fullft")
 GROUP_SOURCE: dict[str, str] = {}
 for source, gold_group, source_suffix in _SOURCE_ROWS:
     GROUP_SOURCE[gold_group] = source
+    GROUP_SOURCE[f"gen_from_{source_suffix}"] = source
     GROUP_SOURCE[f"base_gen_from_{source_suffix}"] = source
     GROUP_SOURCE[f"lora_gen_from_{source_suffix}"] = source
     GROUP_SOURCE[f"fullft_gen_from_{source_suffix}"] = source
@@ -45,10 +46,10 @@ GROUP_VARIANT = {
         else "base_generated"
         if group.startswith("base_gen_")
         else "lora_generated"
-        if group.startswith("lora_gen_")
+        if group.startswith(("gen_from_", "lora_gen_"))
         else "fullft_generated"
     )
-    for group in CANDIDATE_GROUPS + FULLFT_CANDIDATE_GROUPS
+    for group in GROUP_SOURCE
 }
 
 SOURCE_LABELS = {
@@ -241,6 +242,8 @@ def plot_group_feature_ecdf(
     output_path: Path,
     dpi: int,
     group_order: Sequence[str] = CANDIDATE_GROUPS,
+    title: str | None = None,
+    x_label: str | None = None,
 ) -> None:
     if dpi <= 0:
         raise ValueError("Figure DPI must be positive.")
@@ -279,11 +282,13 @@ def plot_group_feature_ecdf(
     sample_size = next(iter(group_counts))
     axis.axvline(0.0, color="#555555", linewidth=1.0, linestyle=(0, (1, 2)))
     axis.set_title(
-        f"{model_display_name}: RMIA feature distributions\n"
-        f"Nine candidate groups, n={sample_size} per group",
+        f"{model_display_name}: {title or 'RMIA feature distributions'}\n"
+        f"{len(group_order)} candidate groups, n={sample_size} per group",
         pad=12,
     )
-    axis.set_xlabel("Relative log-likelihood (target vs. five-shadow reference)")
+    axis.set_xlabel(
+        x_label or "Relative log-likelihood (target vs. five-shadow reference)"
+    )
     axis.set_ylabel("Empirical cumulative probability")
     axis.set_ylim(0.0, 1.0)
     axis.grid(color="#D7D7D7", linewidth=0.7, alpha=0.7)
