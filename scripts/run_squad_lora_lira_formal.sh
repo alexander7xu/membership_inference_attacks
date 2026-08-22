@@ -22,6 +22,7 @@ esac
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 INFERENCE_BATCH_SIZE="${INFERENCE_BATCH_SIZE:-96}"
+ATTACK_BATCH_SIZE="${ATTACK_BATCH_SIZE:-32}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
 CONFIG_NAME=squad_lora_lira
 OUTPUT_ROOT=outputs/squad_lora_lira
@@ -41,7 +42,7 @@ run_stage() {
     eval.batch_size="$INFERENCE_BATCH_SIZE" \
     eval.generation_batch_size="$INFERENCE_BATCH_SIZE" \
     generation.batch_size="$INFERENCE_BATCH_SIZE" \
-    attack.batch_size="$INFERENCE_BATCH_SIZE"
+    attack.batch_size="$ATTACK_BATCH_SIZE"
   printf '[%s] model=%s stage=%s complete\n' "$(date --iso-8601=seconds)" "$model" "$stage"
 }
 
