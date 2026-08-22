@@ -27,9 +27,10 @@ case "$mode" in
 esac
 
 project_root=$(pwd)
+shared_project_root=$(readlink -f "$project_root")
 stamp=$(date -u +%Y%m%d_%H%M%S)
 job_name="squad_lora_lira_${model}_${stamp}"
-log_dir="$project_root/logs"
+log_dir="$shared_project_root/logs"
 mkdir -p "$log_dir"
 
 cache_root="/home/c01xuju/.cache"
