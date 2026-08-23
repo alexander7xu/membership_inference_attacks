@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
@@ -294,6 +295,33 @@ def test_lora_shadow_expansion_reuse_is_hash_verified_and_idempotent(
         force=True,
     )
     assert repaired == first
+
+
+def test_lora_target_eval_only_reuse_does_not_require_generated_artifacts(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source" / "model"
+    destination = tmp_path / "destination" / "model"
+    expected_config = _write_lora_expansion_fixture(source)
+    shutil.rmtree(source / "generated")
+
+    record = prepare_lora_shadow_expansion_inputs(
+        project_root=tmp_path,
+        source_model_root=source,
+        destination_model_root=destination,
+        expected_config=expected_config,
+        expected_source_shadow_count=5,
+        seed=42,
+        target_eval_name="target_lora",
+        force=False,
+        include_generated=False,
+    )
+
+    assert record["mode"] == "target_eval_only"
+    assert set(record["artifact_sha256"]) == {"target", "eval"}
+    assert (destination / "target" / "seed_42" / "adapter").is_dir()
+    assert (destination / "eval" / "target_lora" / "metrics.json").is_file()
+    assert not (destination / "generated").exists()
 
 
 def test_lora_shadow_expansion_rejects_semantic_tokenizer_change(

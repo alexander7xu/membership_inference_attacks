@@ -38,6 +38,8 @@ for source, gold_group, source_suffix in _SOURCE_ROWS:
     GROUP_SOURCE[f"base_gen_from_{source_suffix}"] = source
     GROUP_SOURCE[f"lora_gen_from_{source_suffix}"] = source
     GROUP_SOURCE[f"fullft_gen_from_{source_suffix}"] = source
+for index in range(5):
+    GROUP_SOURCE[f"gold_squad_validation_{index:02d}"] = "squad_validation"
 
 GROUP_VARIANT = {
     group: (
@@ -76,6 +78,15 @@ VARIANT_LINESTYLES = {
     "base_generated": "--",
     "lora_generated": ":",
     "fullft_generated": ":",
+}
+
+IID_GROUP_COLORS = {
+    "gold_squad_target_train": "#C62828",
+    "gold_squad_validation_00": "#1565C0",
+    "gold_squad_validation_01": "#6A1B9A",
+    "gold_squad_validation_02": "#2E7D32",
+    "gold_squad_validation_03": "#EF6C00",
+    "gold_squad_validation_04": "#00838F",
 }
 
 
@@ -257,6 +268,7 @@ def plot_group_feature_ecdf(
 
     figure, axis = plt.subplots(figsize=(12.5, 6.4))
     figure.subplots_adjust(right=0.76)
+    iid_suite = set(group_order) == set(IID_GROUP_COLORS)
     group_counts: set[int] = set()
     for group in group_order:
         values = sorted(
@@ -273,8 +285,8 @@ def plot_group_feature_ecdf(
             cumulative,
             where="post",
             linewidth=2.0,
-            linestyle=VARIANT_LINESTYLES[variant],
-            color=SOURCE_COLORS[source],
+            linestyle="-" if iid_suite else VARIANT_LINESTYLES[variant],
+            color=IID_GROUP_COLORS[group] if iid_suite else SOURCE_COLORS[source],
         )
 
     if len(group_counts) != 1:
@@ -294,6 +306,36 @@ def plot_group_feature_ecdf(
     axis.grid(color="#D7D7D7", linewidth=0.7, alpha=0.7)
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
+
+    if iid_suite:
+        labels = {
+            "gold_squad_target_train": "Target members",
+            **{
+                f"gold_squad_validation_{index:02d}": f"Validation slice {index:02d}"
+                for index in range(5)
+            },
+        }
+        axis.legend(
+            handles=[
+                Line2D(
+                    [0],
+                    [0],
+                    color=IID_GROUP_COLORS[group],
+                    linewidth=2.4,
+                    label=labels[group],
+                )
+                for group in group_order
+            ],
+            title="Gold SQuAD group",
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            frameon=False,
+            fontsize=9,
+            title_fontsize=9,
+        )
+        figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.close(figure)
+        return
 
     source_handles = [
         Line2D(

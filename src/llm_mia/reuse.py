@@ -167,6 +167,7 @@ def prepare_lora_shadow_expansion_inputs(
     seed: int,
     target_eval_name: str,
     force: bool,
+    include_generated: bool = True,
 ) -> dict[str, Any]:
     """Validate and copy immutable non-shadow inputs from a prior LoRA run."""
     _require(
@@ -234,6 +235,48 @@ def prepare_lora_shadow_expansion_inputs(
             context=eval_name,
         )
 
+    target_hashes = _tree_hashes(source_model_root / "target")
+    eval_hashes = _tree_hashes(source_eval)
+    if not include_generated:
+        _copy_tree_immutable(
+            source_model_root / "target",
+            destination_model_root / "target",
+            expected_hashes=target_hashes,
+            force=force,
+        )
+        _copy_tree_immutable(
+            source_eval,
+            destination_model_root / "eval",
+            expected_hashes=eval_hashes,
+            force=force,
+        )
+        return {
+            "status": "reused",
+            "mode": "target_eval_only",
+            "source_model_root": str(source_model_root.relative_to(project_root)),
+            "destination_model_root": str(
+                destination_model_root.relative_to(project_root)
+            ),
+            "expected_source_shadow_count": expected_source_shadow_count,
+            "destination_shadow_count": int(expected_config["shadow"]["count"]),
+            "validated_config_sections": {
+                "target": list(_LORA_TARGET_REUSE_CONFIG_SECTIONS),
+                "evaluation": list(_LORA_INFERENCE_REUSE_CONFIG_SECTIONS),
+                "generated": [],
+            },
+            "historical_config_compatibility": {
+                "target_ignored_keys": {
+                    section: sorted(keys)
+                    for section, keys in _HISTORICAL_TARGET_IGNORED_CONFIG_KEYS.items()
+                }
+            },
+            "source_config_sha256": file_sha256(source_config_path),
+            "artifact_sha256": {
+                "target": target_hashes,
+                "eval": eval_hashes,
+            },
+        }
+
     source_generated = source_model_root / "generated"
     generated_files = (
         "public_generated.jsonl",
@@ -286,8 +329,6 @@ def prepare_lora_shadow_expansion_inputs(
             f"Reusable generated artifact hash mismatch: {path}",
         )
 
-    target_hashes = _tree_hashes(source_model_root / "target")
-    eval_hashes = _tree_hashes(source_eval)
     _copy_tree_immutable(
         source_model_root / "target",
         destination_model_root / "target",

@@ -203,6 +203,68 @@ def deterministic_unique_subset(
     return result
 
 
+def build_squad_validation_iid_groups(
+    validation_rows: list[QARecord],
+    *,
+    baseline_candidates: list[QARecord],
+    population: list[QARecord],
+    target_train: list[QARecord],
+    seed: int,
+    group_size: int,
+    group_count: int,
+) -> dict[str, list[QARecord]]:
+    if group_size <= 0 or group_count <= 0:
+        raise ValueError("IID candidate group size and count must be positive.")
+    if len(baseline_candidates) != group_size:
+        raise ValueError("The baseline IID candidate group has the wrong size.")
+
+    target_ids = {row.record_id for row in target_train}
+    target_hashes = {row.content_sha256 for row in target_train}
+    population_ids = {row.record_id for row in population}
+    population_hashes = {row.content_sha256 for row in population}
+    baseline_ids = {row.record_id for row in baseline_candidates}
+    baseline_hashes = {row.content_sha256 for row in baseline_candidates}
+    if (
+        len(baseline_ids) != group_size
+        or len(baseline_hashes) != group_size
+        or baseline_ids & (target_ids | population_ids)
+        or baseline_hashes & (target_hashes | population_hashes)
+    ):
+        raise ValueError(
+            "The baseline IID candidates are not unique and disjoint from target "
+            "training and population records."
+        )
+
+    excluded_ids = target_ids | population_ids | baseline_ids
+    additional = deterministic_unique_subset(
+        [row for row in validation_rows if row.record_id not in excluded_ids],
+        seed=seed,
+        limit=(group_count - 1) * group_size,
+        namespace="squad_validation_iid_ablation",
+        excluded_content_hashes=target_hashes | population_hashes | baseline_hashes,
+    )
+    expected_additional = (group_count - 1) * group_size
+    if len(additional) != expected_additional:
+        raise ValueError(
+            "SQuAD validation cannot supply enough unique, disjoint IID candidates."
+        )
+
+    groups = {"gold_squad_validation_00": list(baseline_candidates)}
+    for index in range(1, group_count):
+        start = (index - 1) * group_size
+        groups[f"gold_squad_validation_{index:02d}"] = additional[
+            start : start + group_size
+        ]
+    all_rows = [row for rows in groups.values() for row in rows]
+    if (
+        len(all_rows) != group_count * group_size
+        or len({row.record_id for row in all_rows}) != len(all_rows)
+        or len({row.content_sha256 for row in all_rows}) != len(all_rows)
+    ):
+        raise ValueError("IID validation groups are not mutually unique.")
+    return groups
+
+
 def record_to_json(record: QARecord) -> dict[str, Any]:
     data = asdict(record)
     data["answers"] = list(record.answers)
