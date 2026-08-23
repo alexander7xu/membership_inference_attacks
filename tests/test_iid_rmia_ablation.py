@@ -2,7 +2,11 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from src.llm_mia.data import QARecord, build_squad_validation_iid_groups
+from src.llm_mia.data import (
+    QARecord,
+    build_squad_validation_iid_groups,
+    canonicalize_candidate_rows,
+)
 from src.llm_mia.plotting import IID_GROUP_COLORS, plot_group_feature_ecdf
 from src.llm_mia.workflow import attack_metrics
 
@@ -78,6 +82,40 @@ def test_iid_validation_groups_reject_nonunique_baseline() -> None:
         assert "not unique" in str(error)
     else:
         raise AssertionError("A duplicate baseline IID group must be rejected.")
+
+
+def test_iid_canonicalization_preserves_safe_control_candidate_ids() -> None:
+    records = _unique_records("shared", 2, split="validation")
+    candidate_ids = [
+        f"cand_gold_squad_validation_{record.content_sha256[:20]}" for record in records
+    ]
+    public_rows = [
+        {
+            "candidate_id": candidate,
+            "prompt": record.prompt,
+            "completion": record.completion,
+            "content_sha256": record.content_sha256,
+        }
+        for candidate, record in zip(candidate_ids, records, strict=True)
+    ]
+    private_rows = [
+        {
+            "candidate_id": candidate,
+            "private_group": "gold_squad_validation_00",
+            "record_membership_label": 0,
+        }
+        for candidate in candidate_ids
+    ]
+
+    canonical, mapping = canonicalize_candidate_rows(
+        public_rows,
+        private_rows,
+        preserve_source_candidate_ids=True,
+    )
+
+    assert [row["candidate_id"] for row in canonical] == candidate_ids
+    assert [row["candidate_id"] for row in mapping] == candidate_ids
+    assert [row["source_candidate_id"] for row in mapping] == candidate_ids
 
 
 def test_iid_attack_metrics_include_slices_and_pooled_tpr() -> None:

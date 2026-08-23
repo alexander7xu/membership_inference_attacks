@@ -328,9 +328,12 @@ def deduplicate_candidate_rows(
 
 
 def canonicalize_candidate_rows(
-    public_rows: list[dict[str, Any]], private_rows: list[dict[str, Any]]
+    public_rows: list[dict[str, Any]],
+    private_rows: list[dict[str, Any]],
+    *,
+    preserve_source_candidate_ids: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Canonicalize model inputs while preserving all evaluator-only provenance."""
+    """Canonicalize model inputs and preserve evaluator-only provenance."""
     if len(public_rows) != len(private_rows):
         raise ValueError("Public candidates and private labels must have equal length.")
 
@@ -350,7 +353,11 @@ def canonicalize_candidate_rows(
         content_hash = str(public.get("content_sha256", ""))
         if not content_hash:
             raise ValueError("Public candidates must include content_sha256.")
-        canonical_id = f"candidate_{content_hash[:20]}"
+        canonical_id = (
+            source_candidate_id
+            if preserve_source_candidate_ids
+            else f"candidate_{content_hash[:20]}"
+        )
         previous_hash = content_by_canonical_id.get(canonical_id)
         if previous_hash is not None and previous_hash != content_hash:
             raise ValueError(f"Canonical candidate ID collision: {canonical_id}")

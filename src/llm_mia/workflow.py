@@ -2177,7 +2177,9 @@ def _build_squad_validation_iid_candidates(
                 }
             )
     public_rows, private_rows = canonicalize_candidate_rows(
-        raw_public_rows, raw_private_rows
+        raw_public_rows,
+        raw_private_rows,
+        preserve_source_candidate_ids=True,
     )
     if (
         len(raw_public_rows) != expected_rows
