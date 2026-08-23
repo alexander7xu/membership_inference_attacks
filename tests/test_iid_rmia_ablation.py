@@ -183,3 +183,5 @@ def test_iid_config_and_runners_preserve_scientific_settings() -> None:
         in submitter
     )
     assert "--parsable" in submitter
+    assert 'if [[ -n "${EXCLUDE_NODES:-}" ]]' in submitter
+    assert 'exclude_args+=(--exclude="$EXCLUDE_NODES")' in submitter

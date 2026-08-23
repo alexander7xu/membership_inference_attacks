@@ -47,8 +47,14 @@ job_command+="; mkdir -p $cache_root/wandb $cache_root/triton $data_root/wandb"
 job_command+="; cd $project_root"
 job_command+="; exec bash ./scripts/run_squad_lora_rmia_iid_ablation_formal.sh $model"
 
+exclude_args=()
+if [[ -n "${EXCLUDE_NODES:-}" ]]; then
+  exclude_args+=(--exclude="$EXCLUDE_NODES")
+fi
+
 sbatch \
   --parsable \
+  "${exclude_args[@]}" \
   --nodes=1 \
   --ntasks=1 \
   --partition="$partition" \
