@@ -31,6 +31,7 @@ from src.llm_mia.analysis import (
     fixed_variance_lira_parameters,
     online_lira_fixed_variance_score,
     online_rmia_score,
+    paired_bootstrap_binary_metric_differences,
     population_relative_loglikelihood,
     tpr_at_fpr,
 )
@@ -52,7 +53,9 @@ from src.llm_mia.data import (
     split_records,
     split_squad_train,
     squad_row_to_record,
+    text_sha256,
     trivia_row_to_record,
+    write_explicit_shadow_masks,
     write_json,
     write_jsonl,
     write_shadow_masks,
@@ -153,6 +156,8 @@ def run_stage(cfg: DictConfig, *, command: str) -> None:
             run_mixed_distribution_control(
                 cfg, project_root=project_root, command=command
             )
+        elif stage == "compare_gold_iid":
+            run_gold_iid_comparison(cfg, project_root=project_root, command=command)
         elif stage == "validate":
             validate_formal_outputs(cfg, project_root=project_root, command=command)
         elif stage == "plot_rmia_feature":
@@ -1091,7 +1096,7 @@ def train_shadows(
     candidate_content_hashes = {str(row["content_sha256"]) for row in candidates}
     population_hashes: set[str] = set()
     filler_excluded_hashes = set(target_train_hashes)
-    if _iid_ablation_enabled(cfg):
+    if _safe_distribution_ablation_enabled(cfg):
         population_hashes = {
             record.content_sha256
             for record in materialize_records(
@@ -1135,9 +1140,12 @@ def train_shadows(
         if {record.content_sha256 for record in fill} & target_train_hashes:
             raise ValueError(f"Shadow {index} filler overlaps target-training content.")
         fill_hashes = {record.content_sha256 for record in fill}
-        if _iid_ablation_enabled(cfg) and fill_hashes & candidate_content_hashes:
+        if (
+            _safe_distribution_ablation_enabled(cfg)
+            and fill_hashes & candidate_content_hashes
+        ):
             raise ValueError(f"Shadow {index} filler leaks candidate content.")
-        if _iid_ablation_enabled(cfg) and fill_hashes & population_hashes:
+        if _safe_distribution_ablation_enabled(cfg) and fill_hashes & population_hashes:
             raise ValueError(f"Shadow {index} filler leaks population content.")
         expected_included_hashes = {
             str(row["content_sha256"])
@@ -1145,7 +1153,7 @@ def train_shadows(
             if masks[str(row["candidate_id"])][index] == 1
         }
         if (
-            _iid_ablation_enabled(cfg)
+            _safe_distribution_ablation_enabled(cfg)
             and (set(content_hashes) & candidate_content_hashes)
             != expected_included_hashes
         ):
@@ -1186,7 +1194,7 @@ def train_shadows(
                         "forbidden_population_overlap": 0,
                         "out_candidate_leakage": 0,
                     }
-                    if _iid_ablation_enabled(cfg)
+                    if _safe_distribution_ablation_enabled(cfg)
                     else {}
                 ),
                 "train_size": len(records),
@@ -1564,6 +1572,320 @@ def generation_metrics(
     }
 
 
+def _generate_target_generated_validation_candidates(
+    cfg: DictConfig, *, project_root: Path, command: str
+) -> None:
+    source_root, source_files = _validate_gold_iid_source(
+        cfg, project_root=project_root
+    )
+    paths = _target_generated_generation_paths(cfg, project_root)
+    group_size = int(cfg.candidate_suite.group_size)
+    group_count = int(cfg.candidate_suite.nonmember_group_count)
+    expected_rows = group_size * group_count
+    artifact_files = {
+        "public_generated": paths["public"],
+        "private_generated_labels": paths["private"],
+        "source_mapping": paths["mapping"],
+        "metrics": paths["metrics"],
+        "resolved_config": paths["resolved_config"],
+    }
+    source_candidate_sha256 = {
+        name: file_sha256(source_files[name])
+        for name in (
+            "candidate_manifest",
+            "public_candidates",
+            "evaluator_mapping",
+            "shadow_masks",
+            "source_ids",
+        )
+    }
+    target_root = model_root(cfg, project_root, smoke=False) / "target"
+    target_sha256 = _tree_file_sha256(target_root)
+    if paths["manifest"].is_file() and not bool(cfg.workflow.force):
+        prior = read_json(paths["manifest"])
+        if (
+            _artifact_record_is_complete(
+                cfg,
+                paths["manifest"],
+                artifact_files,
+                expected_row_counts={
+                    "public_generated": expected_rows,
+                    "private_generated_labels": expected_rows,
+                    "source_mapping": expected_rows,
+                },
+            )
+            and prior.get("source_candidate_sha256") == source_candidate_sha256
+            and prior.get("generator_target_sha256") == target_sha256
+        ):
+            LOGGER.info(
+                "Reusing target-generated IID candidates: %s", paths["manifest"]
+            )
+            return
+        raise ValueError(
+            "Existing target-generated artifacts are incomplete or stale. Use "
+            "workflow.force=true to rebuild them."
+        )
+    if any(path.exists() for path in artifact_files.values()) and not bool(
+        cfg.workflow.force
+    ):
+        raise ValueError(
+            "Partial target-generated artifacts exist. Use workflow.force=true to "
+            "rebuild them."
+        )
+
+    source_public = {
+        str(row["candidate_id"]): row
+        for row in read_jsonl(source_files["public_candidates"])
+    }
+    source_private = read_jsonl(source_files["evaluator_mapping"])
+    source_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in source_private:
+        key = (str(row["private_group"]), str(row["source_id"]))
+        if key in source_rows:
+            raise ValueError(f"Duplicate gold-IID source identity: {key}")
+        source_rows[key] = row
+    source_ids = read_json(source_files["source_ids"])
+
+    target_manifest = (
+        target_root / f"seed_{int(cfg.runtime.seed)}" / "train_manifest.jsonl"
+    )
+    target_hashes = {
+        record_from_json(row).content_sha256 for row in read_jsonl(target_manifest)
+    }
+    population_hashes = {
+        record.content_sha256
+        for record in load_split_file(cfg, project_root, "squad_validation_population")
+    }
+    auxiliary_hashes = {
+        record.content_sha256
+        for record in load_split_file(
+            cfg, project_root, "squad_attacker_auxiliary_pool"
+        )
+    }
+    target_member_hashes = {
+        str(source_public[str(row["candidate_id"])]["content_sha256"])
+        for row in source_private
+        if str(row["private_group"]) == "gold_squad_target_train"
+    }
+    forbidden_hashes = (
+        target_hashes | population_hashes | auxiliary_hashes | target_member_hashes
+    )
+
+    strategy = fine_tuning_strategy(cfg)
+    target_checkpoint = target_checkpoint_path(cfg, project_root, smoke=False)
+    model, tokenizer = strategy.load_for_inference(cfg, target_checkpoint)
+    checkpoint_fingerprint = config_fingerprint(target_sha256)
+    generation_config = {
+        "do_sample": bool(cfg.generation.do_sample),
+        "temperature": float(cfg.generation.temperature),
+        "max_new_tokens": int(cfg.generation.max_new_tokens),
+    }
+    public_rows: list[dict[str, Any]] = []
+    private_rows: list[dict[str, Any]] = []
+    mapping_rows: list[dict[str, Any]] = []
+    metrics: dict[str, float] = {}
+    seen_hashes: set[str] = set()
+    for index in range(group_count):
+        source_group = f"gold_squad_validation_{index:02d}"
+        destination_group = f"target_gen_squad_validation_{index:02d}"
+        records: list[QARecord] = []
+        source_metadata: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for source_id in source_ids[source_group]:
+            private = source_rows.get((source_group, str(source_id)))
+            if private is None:
+                raise ValueError(
+                    f"Missing gold-IID source row: {source_group}:{source_id}"
+                )
+            public = source_public.get(str(private["candidate_id"]))
+            if public is None:
+                raise ValueError(
+                    f"Missing gold-IID public row: {private['candidate_id']}"
+                )
+            if int(private["record_membership_label"]) != 0:
+                raise ValueError("Generated source prompts must be target non-members.")
+            records.append(
+                QARecord(
+                    record_id=str(source_id),
+                    dataset="squad",
+                    split=source_group,
+                    prompt=str(public["prompt"]),
+                    completion=str(public["completion"]),
+                    answers=(str(public["completion"]).strip(),),
+                )
+            )
+            source_metadata.append((public, private))
+        if len(records) != group_size:
+            raise ValueError(
+                f"Generated source group has the wrong size: {source_group}"
+            )
+        completions = generate_completions(
+            model,
+            tokenizer,
+            records,
+            batch_size=int(cfg.generation.batch_size),
+            max_length=int(cfg.tokenizer.max_length),
+            max_new_tokens=int(cfg.generation.max_new_tokens),
+            do_sample=bool(cfg.generation.do_sample),
+            temperature=float(cfg.generation.temperature),
+        )
+        exact_matches: list[float] = []
+        f1_values: list[float] = []
+        token_lengths: list[float] = []
+        empty_count = 0
+        for source, completion_text, metadata in zip(
+            records, completions, source_metadata, strict=True
+        ):
+            source_public_row, source_private_row = metadata
+            stripped_completion = completion_text.strip()
+            empty_count += int(not stripped_completion)
+            generated = QARecord(
+                record_id=f"{destination_group}:{source.record_id}",
+                dataset="generated",
+                split=destination_group,
+                prompt=source.prompt,
+                completion=f" {stripped_completion or '<empty>'}",
+                answers=source.answers,
+            )
+            if generated.content_sha256 in forbidden_hashes:
+                raise ValueError(
+                    f"Generated candidate overlaps a forbidden record: "
+                    f"{destination_group}:{source.record_id}"
+                )
+            if generated.content_sha256 in seen_hashes:
+                raise ValueError(
+                    "Target-generated candidates contain duplicate content."
+                )
+            seen_hashes.add(generated.content_sha256)
+            generated_id = candidate_id(f"cand_{destination_group}", generated)
+            prompt_hash = text_sha256(source.prompt)
+            public_rows.append(
+                {
+                    **public_candidate(generated, generated_id),
+                    "model_run_id": str(target_checkpoint),
+                    "generator_checkpoint_sha256": checkpoint_fingerprint,
+                    "generation_config": generation_config,
+                    "tokenizer_id": str(cfg.model.name_or_path),
+                }
+            )
+            private_rows.append(
+                {
+                    "candidate_id": generated_id,
+                    "private_group": destination_group,
+                    "source_id": source.record_id,
+                    "source_prompt_sha256": prompt_hash,
+                    "source_candidate_id": str(source_private_row["candidate_id"]),
+                    "source_prompt_membership": 0,
+                    "exact_reconstruction": 0,
+                    "record_membership_label": 0,
+                    "generator_checkpoint_sha256": checkpoint_fingerprint,
+                }
+            )
+            mapping_rows.append(
+                {
+                    "source_group": source_group,
+                    "destination_group": destination_group,
+                    "source_id": source.record_id,
+                    "source_candidate_id": str(source_private_row["candidate_id"]),
+                    "generated_candidate_id": generated_id,
+                    "source_prompt_sha256": prompt_hash,
+                    "source_content_sha256": str(source_public_row["content_sha256"]),
+                    "generated_content_sha256": generated.content_sha256,
+                }
+            )
+            exact_matches.append(exact_match(completion_text, source.answers))
+            f1_values.append(token_f1(completion_text, source.answers))
+            token_lengths.append(
+                float(
+                    len(
+                        tokenizer(
+                            generated.completion, add_special_tokens=False
+                        ).input_ids
+                    )
+                )
+            )
+        metrics[f"{destination_group}/exact_match"] = mean(exact_matches)
+        metrics[f"{destination_group}/f1"] = mean(f1_values)
+        metrics[f"{destination_group}/empty_rate"] = empty_count / group_size
+        metrics[f"{destination_group}/completion_tokens_mean"] = mean(token_lengths)
+        metrics[f"{destination_group}/completion_tokens_min"] = min(token_lengths)
+        metrics[f"{destination_group}/completion_tokens_max"] = max(token_lengths)
+
+    del model
+    cleanup_cuda()
+    if len(public_rows) != expected_rows or len(seen_hashes) != expected_rows:
+        raise ValueError("Target-generated candidate count or uniqueness failed.")
+    write_jsonl(paths["public"], public_rows)
+    write_jsonl(paths["private"], private_rows)
+    write_jsonl(paths["mapping"], mapping_rows)
+    write_json(paths["metrics"], metrics)
+    write_yaml(paths["resolved_config"], _resolved_config(cfg))
+    manifest = artifact_manifest(
+        cfg,
+        project_root,
+        artifact_files,
+        row_counts={
+            "public_generated": len(public_rows),
+            "private_generated_labels": len(private_rows),
+            "source_mapping": len(mapping_rows),
+        },
+    )
+    manifest.update(
+        {
+            "generation_mode": "target_generated_squad_validation",
+            "source_root": str(source_root.relative_to(project_root)),
+            "source_candidate_sha256": source_candidate_sha256,
+            "generator_target_sha256": target_sha256,
+            "generator_checkpoint_fingerprint": checkpoint_fingerprint,
+            "generation_config": generation_config,
+            "group_counts": {
+                f"target_gen_squad_validation_{index:02d}": group_size
+                for index in range(group_count)
+            },
+            "forbidden_overlap": {
+                "target_train": 0,
+                "population": 0,
+                "auxiliary_pool": 0,
+                "target_members": 0,
+            },
+        }
+    )
+    write_json(paths["manifest"], manifest)
+    tracking_artifacts = _log_wandb_stage(
+        stage="target_generated_candidates",
+        metrics={
+            "generated_candidates": float(len(public_rows)),
+            **metrics,
+        },
+        paths={**artifact_files, "manifest": paths["manifest"]},
+    )
+    write_experiment_markdown(
+        paths["experiment"],
+        purpose=(
+            f"Generate source-aligned non-member candidates with the verified "
+            f"{cfg.model.display_name} target adapter."
+        ),
+        hypothesis=str(cfg.experiment.hypothesis),
+        command=command,
+        overrides=[],
+        config_fingerprint_value=config_fingerprint(_resolved_config(cfg)),
+        git_state=collect_git_state(project_root),
+        environment=extended_environment(project_root),
+        artifacts={
+            **{name: str(path) for name, path in artifact_files.items()},
+            "manifest": str(paths["manifest"]),
+            **tracking_artifacts,
+        },
+        metrics=metrics,
+        conclusion=(
+            "All generated records were unique record-level target non-members and "
+            "retained exact source-prompt provenance."
+        ),
+        achieved_purpose=True,
+        next_action="Inherit source masks and build the treatment candidate suite.",
+        wandb_run_id=_active_wandb_run_id(),
+    )
+
+
 def generate_target_candidates(
     cfg: DictConfig,
     *,
@@ -1571,6 +1893,13 @@ def generate_target_candidates(
     command: str,
     smoke: bool,
 ) -> None:
+    if _target_generated_ablation_enabled(cfg):
+        if smoke:
+            raise ValueError("Target-generated ablation supports formal stages only.")
+        _generate_target_generated_validation_candidates(
+            cfg, project_root=project_root, command=command
+        )
+        return
     strategy = fine_tuning_strategy(cfg)
     target_checkpoint = train_target(
         cfg, project_root=project_root, command=command, smoke=smoke
@@ -2036,10 +2365,242 @@ def _build_reused_shadow_expansion_candidates(
     )
 
 
+def _candidate_suite_mode(cfg: DictConfig) -> str:
+    return str(OmegaConf.select(cfg, "candidate_suite.mode", default="mixed"))
+
+
 def _iid_ablation_enabled(cfg: DictConfig) -> bool:
-    return (
-        str(OmegaConf.select(cfg, "candidate_suite.mode", default="mixed"))
-        == "squad_validation_iid"
+    return _candidate_suite_mode(cfg) == "squad_validation_iid"
+
+
+def _target_generated_ablation_enabled(cfg: DictConfig) -> bool:
+    return _candidate_suite_mode(cfg) == "target_generated_squad_validation"
+
+
+def _safe_distribution_ablation_enabled(cfg: DictConfig) -> bool:
+    return _iid_ablation_enabled(cfg) or _target_generated_ablation_enabled(cfg)
+
+
+def _inherit_target_generated_masks(
+    destination_private: list[dict[str, Any]],
+    source_private: list[dict[str, Any]],
+    source_masks: dict[str, list[int]],
+    *,
+    group_count: int,
+) -> dict[str, list[int]]:
+    source_by_id: dict[str, dict[str, Any]] = {}
+    source_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in source_private:
+        candidate = str(row["candidate_id"])
+        identity = (str(row["private_group"]), str(row["source_id"]))
+        if candidate in source_by_id or identity in source_by_identity:
+            raise ValueError("Gold-IID source candidate identity is duplicated.")
+        source_by_id[candidate] = row
+        source_by_identity[identity] = row
+    result: dict[str, list[int]] = {}
+    for row in destination_private:
+        candidate = str(row["candidate_id"])
+        group = str(row["private_group"])
+        if candidate in result:
+            raise ValueError(f"Duplicate destination candidate: {candidate}")
+        if group == "gold_squad_target_train":
+            source = source_by_id.get(candidate)
+            if source is None or str(source["private_group"]) != group:
+                raise ValueError(
+                    "Target-member candidate differs from gold-IID source."
+                )
+        elif group.startswith("target_gen_squad_validation_"):
+            suffix = group.removeprefix("target_gen_squad_validation_")
+            if not suffix.isdigit() or int(suffix) >= group_count:
+                raise ValueError(f"Unexpected generated candidate group: {group}")
+            source_group = f"gold_squad_validation_{int(suffix):02d}"
+            source = source_by_identity.get((source_group, str(row["source_id"])))
+            if source is None or str(row.get("source_candidate_id", "")) != str(
+                source["candidate_id"]
+            ):
+                raise ValueError(
+                    f"Generated source identity differs: {group}:{row['source_id']}"
+                )
+        else:
+            raise ValueError(f"Unexpected treatment candidate group: {group}")
+        mask = source_masks.get(str(source["candidate_id"]))
+        if mask is None:
+            raise ValueError(f"Missing source mask: {source['candidate_id']}")
+        result[candidate] = list(mask)
+    return result
+
+
+def _build_target_generated_candidates(cfg: DictConfig, *, project_root: Path) -> None:
+    generate_target_candidates(
+        cfg,
+        project_root=project_root,
+        command="build_target_generated_candidates dependency generation",
+        smoke=False,
+    )
+    source_root, source_files = _validate_gold_iid_source(
+        cfg, project_root=project_root
+    )
+    generated_paths = _target_generated_generation_paths(cfg, project_root)
+    paths = candidate_paths(cfg, project_root, smoke=False)
+    source_ids_path = paths["manifest"].parent / "source_ids.json"
+    artifact_files = {
+        "raw_public_candidates": paths["raw_public"],
+        "raw_private_provenance": paths["raw_private"],
+        "public_candidates": paths["public"],
+        "evaluator_mapping": paths["private"],
+        "shadow_masks": paths["masks"],
+        "source_ids": source_ids_path,
+    }
+    group_size = int(cfg.candidate_suite.group_size)
+    group_count = int(cfg.candidate_suite.nonmember_group_count)
+    expected_rows = group_size * (group_count + 1)
+    generation_manifest_sha256 = file_sha256(generated_paths["manifest"])
+    source_candidate_sha256 = {
+        name: file_sha256(source_files[name])
+        for name in (
+            "candidate_manifest",
+            "raw_public_candidates",
+            "raw_private_provenance",
+            "public_candidates",
+            "evaluator_mapping",
+            "shadow_masks",
+            "source_ids",
+        )
+    }
+    if paths["manifest"].is_file() and not bool(cfg.workflow.force):
+        prior = read_json(paths["manifest"])
+        if (
+            _artifact_record_is_complete(
+                cfg,
+                paths["manifest"],
+                artifact_files,
+                expected_row_counts={
+                    "raw_public_candidates": expected_rows,
+                    "raw_private_provenance": expected_rows,
+                    "public_candidates": expected_rows,
+                    "evaluator_mapping": expected_rows,
+                    "shadow_models": int(cfg.shadow.count),
+                },
+            )
+            and prior.get("generation_manifest_sha256") == generation_manifest_sha256
+            and prior.get("source_candidate_sha256") == source_candidate_sha256
+        ):
+            LOGGER.info(
+                "Reusing target-generated candidate suite: %s", paths["manifest"]
+            )
+            return
+        raise ValueError(
+            "Existing target-generated candidate artifacts are incomplete or stale. "
+            "Use workflow.force=true to rebuild them."
+        )
+    if any(path.exists() for path in artifact_files.values()) and not bool(
+        cfg.workflow.force
+    ):
+        raise ValueError(
+            "Partial target-generated candidate artifacts exist. Use "
+            "workflow.force=true to rebuild them."
+        )
+
+    source_public = read_jsonl(source_files["public_candidates"])
+    source_private = read_jsonl(source_files["evaluator_mapping"])
+    source_public_by_id = {str(row["candidate_id"]): row for row in source_public}
+    target_private = [
+        dict(row)
+        for row in source_private
+        if str(row["private_group"]) == "gold_squad_target_train"
+    ]
+    target_public = [
+        dict(source_public_by_id[str(row["candidate_id"])]) for row in target_private
+    ]
+    generated_public = read_jsonl(generated_paths["public"])
+    generated_private = read_jsonl(generated_paths["private"])
+    if (
+        len(target_public) != group_size
+        or len(generated_public) != group_size * group_count
+        or len(generated_private) != group_size * group_count
+    ):
+        raise ValueError("Target-generated candidate source counts differ.")
+
+    raw_public = [*target_public, *generated_public]
+    raw_private = [*target_private, *generated_private]
+    public_rows, private_rows = canonicalize_candidate_rows(
+        raw_public, raw_private, preserve_source_candidate_ids=True
+    )
+    if (
+        len(raw_public) != expected_rows
+        or len(public_rows) != expected_rows
+        or len(private_rows) != expected_rows
+        or len({str(row["content_sha256"]) for row in public_rows}) != expected_rows
+    ):
+        raise ValueError(
+            "Target-generated candidates must remain 6,144 unique canonical rows."
+        )
+
+    source_masks = read_shadow_masks(source_files["shadow_masks"])
+    inherited_masks = _inherit_target_generated_masks(
+        private_rows,
+        source_private,
+        source_masks,
+        group_count=group_count,
+    )
+    expected_included = [3001, 3088, 3064, 3051, 3071]
+    included = [
+        sum(mask[index] for mask in inherited_masks.values())
+        for index in range(int(cfg.shadow.count))
+    ]
+    if included != expected_included:
+        raise ValueError(f"Target-generated IN counts differ from gold-IID: {included}")
+
+    paths["manifest"].parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(paths["raw_public"], raw_public)
+    write_jsonl(paths["raw_private"], raw_private)
+    write_jsonl(paths["public"], public_rows)
+    write_jsonl(paths["private"], private_rows)
+    write_explicit_shadow_masks(paths["masks"], inherited_masks)
+    shutil.copy2(source_files["source_ids"], source_ids_path)
+    manifest = artifact_manifest(
+        cfg,
+        project_root,
+        artifact_files,
+        row_counts={
+            "raw_public_candidates": len(raw_public),
+            "raw_private_provenance": len(raw_private),
+            "public_candidates": len(public_rows),
+            "evaluator_mapping": len(private_rows),
+            "shadow_models": int(cfg.shadow.count),
+        },
+    )
+    manifest.update(
+        {
+            "candidate_source_mode": "target_generated_squad_validation",
+            "source_root": str(source_root.relative_to(project_root)),
+            "source_candidate_sha256": source_candidate_sha256,
+            "generation_manifest_sha256": generation_manifest_sha256,
+            "group_counts": {
+                "gold_squad_target_train": group_size,
+                **{
+                    f"target_gen_squad_validation_{index:02d}": group_size
+                    for index in range(group_count)
+                },
+            },
+            "canonicalization_loss": len(raw_public) - len(public_rows),
+            "mask_mapping": "slice_index_and_source_id",
+            "source_masks_sha256": file_sha256(source_files["shadow_masks"]),
+            "included_candidates_by_shadow": included,
+            "population_source_sha256": file_sha256(
+                data_root(cfg, project_root) / "squad_validation_population.jsonl"
+            ),
+        }
+    )
+    write_json(paths["manifest"], manifest)
+    _log_wandb_stage(
+        stage="candidates",
+        metrics={
+            "raw_candidates": float(len(raw_public)),
+            "public_candidates": float(len(public_rows)),
+            "generated_nonmembers": float(len(generated_public)),
+        },
+        paths={**paths, "source_ids": source_ids_path},
     )
 
 
@@ -2308,6 +2869,9 @@ def _build_squad_validation_iid_candidates(
 
 
 def build_candidate_set(cfg: DictConfig, *, project_root: Path, smoke: bool) -> None:
+    if not smoke and _target_generated_ablation_enabled(cfg):
+        _build_target_generated_candidates(cfg, project_root=project_root)
+        return
     if not smoke and _iid_ablation_enabled(cfg):
         _build_squad_validation_iid_candidates(cfg, project_root=project_root)
         return
@@ -2728,7 +3292,8 @@ def run_attack(
         bootstrap_samples=int(cfg.attack.bootstrap_samples),
         seed=int(cfg.runtime.seed),
         include_point_tpr=(
-            method == "online_lira_fixed_variance" or _iid_ablation_enabled(cfg)
+            method == "online_lira_fixed_variance"
+            or _safe_distribution_ablation_enabled(cfg)
         ),
     )
     write_json(metrics_path, metrics)
@@ -2790,6 +3355,145 @@ def _tree_file_sha256(root: Path) -> dict[str, str]:
         path.relative_to(root).as_posix(): file_sha256(path)
         for path in sorted(root.rglob("*"))
         if path.is_file()
+    }
+
+
+def _gold_iid_source_artifacts(
+    cfg: DictConfig, project_root: Path
+) -> tuple[Path, dict[str, Path]]:
+    root = project_root / str(cfg.control.source_output_root) / str(cfg.model.key)
+    candidate_root = root / "candidates"
+    attack_root = root / "attack"
+    return root, {
+        "success": root / "_SUCCESS",
+        "completion": root / "completion_manifest.json",
+        "candidate_manifest": candidate_root / "manifest.json",
+        "raw_public_candidates": candidate_root / "raw_public_candidates.jsonl",
+        "raw_private_provenance": candidate_root / "raw_private_provenance.jsonl",
+        "public_candidates": candidate_root / "public_candidates.jsonl",
+        "evaluator_mapping": candidate_root / "evaluator_mapping.jsonl",
+        "shadow_masks": candidate_root / "shadow_masks.csv",
+        "source_ids": candidate_root / "source_ids.json",
+        "attack_manifest": attack_root / "manifest.json",
+        "attack_scores": attack_root / "online_rmia_scores.jsonl",
+        "attack_metrics": attack_root / "metrics.json",
+    }
+
+
+def _validate_gold_iid_source(
+    cfg: DictConfig, *, project_root: Path, require_current_target: bool = True
+) -> tuple[Path, dict[str, Path]]:
+    root, files = _gold_iid_source_artifacts(cfg, project_root)
+    for path in files.values():
+        if not path.is_file():
+            raise FileNotFoundError(f"Gold-IID source artifact is missing: {path}")
+    completion = read_json(files["completion"])
+    expected_rows = int(cfg.candidate_suite.group_size) * (
+        int(cfg.candidate_suite.nonmember_group_count) + 1
+    )
+    if (
+        completion.get("attack_method") != "online_rmia"
+        or completion.get("candidate_suite") != "squad_validation_iid"
+        or completion.get("shadow_models") != int(cfg.shadow.count)
+        or completion.get("candidate_rows") != expected_rows
+        or completion.get("population_rows")
+        != int(cfg.data.squad_validation_population_size)
+    ):
+        raise ValueError("Gold-IID completion manifest is incompatible.")
+    if completion.get("candidate_manifest_sha256") != file_sha256(
+        files["candidate_manifest"]
+    ):
+        raise ValueError("Gold-IID completion manifest does not bind candidates.")
+    attack_hashes = completion.get("attack_artifact_sha256", {})
+    for name, key in (
+        ("attack_manifest", "manifest"),
+        ("attack_scores", "scores"),
+        ("attack_metrics", "metrics"),
+    ):
+        if attack_hashes.get(key) != file_sha256(files[name]):
+            raise ValueError(f"Gold-IID attack hash mismatch: {name}")
+
+    candidate_manifest = read_json(files["candidate_manifest"])
+    if (
+        candidate_manifest.get("candidate_source_mode") != "squad_validation_iid"
+        or candidate_manifest.get("dataset_revision") != str(cfg.data.squad_revision)
+        or candidate_manifest.get("canonicalization_loss") != 0
+        or candidate_manifest.get("population_source_sha256")
+        != file_sha256(
+            data_root(cfg, project_root) / "squad_validation_population.jsonl"
+        )
+    ):
+        raise ValueError("Gold-IID candidate provenance is incompatible.")
+    for name in (
+        "raw_public_candidates",
+        "raw_private_provenance",
+        "public_candidates",
+        "evaluator_mapping",
+        "shadow_masks",
+        "source_ids",
+    ):
+        if candidate_manifest.get("file_sha256", {}).get(name) != file_sha256(
+            files[name]
+        ):
+            raise ValueError(f"Gold-IID candidate hash mismatch: {name}")
+
+    public_rows = read_jsonl(files["public_candidates"])
+    private_rows = read_jsonl(files["evaluator_mapping"])
+    if len(public_rows) != expected_rows or len(private_rows) != expected_rows:
+        raise ValueError("Gold-IID candidate row count differs.")
+    public_ids = {str(row["candidate_id"]) for row in public_rows}
+    if public_ids != {str(row["candidate_id"]) for row in private_rows}:
+        raise ValueError("Gold-IID public/private candidate IDs differ.")
+    source_ids = read_json(files["source_ids"])
+    expected_groups = (
+        "gold_squad_target_train",
+        *[
+            f"gold_squad_validation_{index:02d}"
+            for index in range(int(cfg.candidate_suite.nonmember_group_count))
+        ],
+    )
+    if set(source_ids) != set(expected_groups) or any(
+        len(source_ids[group]) != int(cfg.candidate_suite.group_size)
+        or len(set(source_ids[group])) != int(cfg.candidate_suite.group_size)
+        for group in expected_groups
+    ):
+        raise ValueError("Gold-IID source IDs are incomplete or duplicated.")
+    masks = read_shadow_masks(files["shadow_masks"])
+    if set(masks) != public_ids or any(
+        len(mask) != int(cfg.shadow.count) for mask in masks.values()
+    ):
+        raise ValueError("Gold-IID masks are incomplete.")
+
+    source_target_hashes = _tree_file_sha256(root / "target")
+    completion_target_hashes = read_json(files["completion"]).get(
+        "target_artifact_sha256"
+    )
+    if completion_target_hashes is not None and (
+        completion_target_hashes != source_target_hashes
+    ):
+        raise ValueError("Gold-IID completion target hashes differ.")
+    current_target = model_root(cfg, project_root, smoke=False) / "target"
+    if require_current_target and (
+        not current_target.is_dir()
+        or _tree_file_sha256(current_target) != source_target_hashes
+    ):
+        raise ValueError("Treatment and gold-IID target artifacts differ.")
+    return root, files
+
+
+def _target_generated_generation_paths(
+    cfg: DictConfig, project_root: Path
+) -> dict[str, Path]:
+    root = model_root(cfg, project_root, smoke=False) / "generated"
+    return {
+        "root": root,
+        "public": root / "public_generated.jsonl",
+        "private": root / "private_generated_labels.jsonl",
+        "mapping": root / "source_mapping.jsonl",
+        "metrics": root / "metrics.json",
+        "manifest": root / "manifest.json",
+        "resolved_config": root / str(cfg.report.resolved_config_filename),
+        "experiment": root / str(cfg.report.experiment_filename),
     }
 
 
@@ -2896,6 +3600,255 @@ def _validate_safe_mixed_control(
         ):
             raise ValueError(f"Safe control shadow checkpoint is incomplete: {run_dir}")
     return source_root, files
+
+
+def run_gold_iid_comparison(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    command: str,
+) -> None:
+    if not _target_generated_ablation_enabled(cfg):
+        raise ValueError(
+            "The gold-IID comparison is only defined for target-generated RMIA."
+        )
+    root = model_root(cfg, project_root, smoke=False)
+    attack_root = root / "attack"
+    candidate = candidate_paths(cfg, project_root, smoke=False)
+    treatment_files = {
+        "candidate_manifest": candidate["manifest"],
+        "public_candidates": candidate["public"],
+        "evaluator_mapping": candidate["private"],
+        "shadow_masks": candidate["masks"],
+        "attack_manifest": attack_root / "manifest.json",
+        "attack_scores": attack_root / "online_rmia_scores.jsonl",
+        "attack_metrics": attack_root / "metrics.json",
+    }
+    for path in treatment_files.values():
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Treatment artifact is missing before comparison: {path}"
+            )
+    source_root, source_files = _validate_gold_iid_source(
+        cfg, project_root=project_root
+    )
+    output_root = root / "control" / "gold_iid"
+    comparison_path = output_root / "comparison.json"
+    manifest_path = output_root / "manifest.json"
+    experiment_path = output_root / str(cfg.report.experiment_filename)
+    lineage = {
+        "source_root": str(source_root.relative_to(project_root)),
+        "source_completion_manifest_sha256": file_sha256(source_files["completion"]),
+        "source_attack_manifest_sha256": file_sha256(source_files["attack_manifest"]),
+        "source_scores_sha256": file_sha256(source_files["attack_scores"]),
+        "source_masks_sha256": file_sha256(source_files["shadow_masks"]),
+        "treatment_attack_manifest_sha256": file_sha256(
+            treatment_files["attack_manifest"]
+        ),
+        "treatment_scores_sha256": file_sha256(treatment_files["attack_scores"]),
+        "treatment_masks_sha256": file_sha256(treatment_files["shadow_masks"]),
+    }
+    if any(path.exists() for path in (comparison_path, manifest_path)) and not bool(
+        cfg.workflow.force
+    ):
+        prior_manifest = read_json(manifest_path) if manifest_path.is_file() else {}
+        if (
+            comparison_path.is_file()
+            and experiment_path.is_file()
+            and prior_manifest.get("comparison_lineage") == lineage
+            and _artifact_record_is_complete(
+                cfg,
+                manifest_path,
+                {"comparison": comparison_path},
+            )
+        ):
+            LOGGER.info("Reusing paired gold-IID comparison: %s", comparison_path)
+            return
+        raise ValueError("Existing gold-IID comparison is incomplete or stale.")
+
+    treatment_scores = {
+        str(row["candidate_id"]): float(row["online_rmia_score"])
+        for row in read_jsonl(treatment_files["attack_scores"])
+    }
+    source_scores = {
+        str(row["candidate_id"]): float(row["online_rmia_score"])
+        for row in read_jsonl(source_files["attack_scores"])
+    }
+    treatment_private = read_jsonl(treatment_files["evaluator_mapping"])
+    source_private = read_jsonl(source_files["evaluator_mapping"])
+    if len(treatment_scores) != len(treatment_private) or len(source_scores) != len(
+        source_private
+    ):
+        raise ValueError("Comparison score and evaluator row counts differ.")
+    source_private_by_id = {str(row["candidate_id"]): row for row in source_private}
+    member_rows = sorted(
+        (
+            row
+            for row in treatment_private
+            if str(row["private_group"]) == "gold_squad_target_train"
+        ),
+        key=lambda row: str(row["candidate_id"]),
+    )
+    if len(member_rows) != int(cfg.candidate_suite.group_size):
+        raise ValueError("Treatment target-member count differs from gold-IID.")
+    member_ids = [str(row["candidate_id"]) for row in member_rows]
+    for candidate in member_ids:
+        source = source_private_by_id.get(candidate)
+        if source is None or str(source["private_group"]) != "gold_squad_target_train":
+            raise ValueError("Treatment target members are not identical to gold-IID.")
+    treatment_positive = [treatment_scores[candidate] for candidate in member_ids]
+    control_positive = [source_scores[candidate] for candidate in member_ids]
+
+    group_count = int(cfg.candidate_suite.nonmember_group_count)
+    group_size = int(cfg.candidate_suite.group_size)
+    paired_groups: dict[str, dict[str, list[float]]] = {}
+    results: dict[str, dict[str, float]] = {}
+    for index in range(group_count):
+        treatment_group = f"target_gen_squad_validation_{index:02d}"
+        source_group = f"gold_squad_validation_{index:02d}"
+        rows = sorted(
+            (
+                row
+                for row in treatment_private
+                if str(row["private_group"]) == treatment_group
+            ),
+            key=lambda row: str(row["source_id"]),
+        )
+        if (
+            len(rows) != group_size
+            or len({str(row["source_id"]) for row in rows}) != group_size
+        ):
+            raise ValueError(f"Treatment slice is incomplete: {treatment_group}")
+        treatment_negative: list[float] = []
+        control_negative: list[float] = []
+        for row in rows:
+            candidate = str(row["candidate_id"])
+            source_candidate = str(row.get("source_candidate_id", ""))
+            source = source_private_by_id.get(source_candidate)
+            if (
+                source is None
+                or str(source["private_group"]) != source_group
+                or str(source["source_id"]) != str(row["source_id"])
+            ):
+                raise ValueError(
+                    f"Treatment/source pairing differs: {treatment_group}:"
+                    f"{row['source_id']}"
+                )
+            treatment_negative.append(treatment_scores[candidate])
+            control_negative.append(source_scores[source_candidate])
+        paired_groups[treatment_group] = {
+            "treatment": treatment_negative,
+            "control": control_negative,
+        }
+        results[treatment_group] = paired_bootstrap_binary_metric_differences(
+            treatment_positive,
+            treatment_negative,
+            control_positive,
+            control_negative,
+            fpr_thresholds=list(cfg.attack.fpr_thresholds),
+            samples=int(cfg.attack.bootstrap_samples),
+            seed=int(cfg.runtime.seed) + index,
+        )
+
+    pooled_treatment = [
+        score
+        for index in range(group_count)
+        for score in paired_groups[f"target_gen_squad_validation_{index:02d}"][
+            "treatment"
+        ]
+    ]
+    pooled_control = [
+        score
+        for index in range(group_count)
+        for score in paired_groups[f"target_gen_squad_validation_{index:02d}"][
+            "control"
+        ]
+    ]
+    results["target_gen_squad_validation_pooled"] = (
+        paired_bootstrap_binary_metric_differences(
+            treatment_positive,
+            pooled_treatment,
+            control_positive,
+            pooled_control,
+            fpr_thresholds=list(cfg.attack.fpr_thresholds),
+            samples=int(cfg.attack.bootstrap_samples),
+            seed=int(cfg.runtime.seed) + group_count,
+        )
+    )
+    comparison = {
+        "comparison": "target_generated_minus_gold_iid",
+        "pairing": "member_candidate_id_and_nonmember_slice_source_id",
+        "bootstrap": {
+            "samples": int(cfg.attack.bootstrap_samples),
+            "shared_indices_between_arms": True,
+            "confidence_level": 0.95,
+        },
+        "row_counts": {
+            "members": len(member_ids),
+            "nonmembers_per_slice": group_size,
+            "pooled_nonmembers": len(pooled_treatment),
+        },
+        "metrics": results,
+        "lineage": lineage,
+    }
+    write_json(comparison_path, comparison)
+    manifest = artifact_manifest(
+        cfg,
+        project_root,
+        {"comparison": comparison_path},
+        row_counts={
+            "members": len(member_ids),
+            "nonmembers_per_slice": group_size,
+            "pooled_nonmembers": len(pooled_treatment),
+        },
+    )
+    manifest.update(
+        {
+            "comparison_kind": "paired_target_generated_minus_gold_iid",
+            "comparison_lineage": lineage,
+            "paired_groups": [
+                f"target_gen_squad_validation_{index:02d}"
+                for index in range(group_count)
+            ],
+        }
+    )
+    write_json(manifest_path, manifest)
+    flat_metrics = {
+        f"{group}/{name}": value
+        for group, group_metrics in results.items()
+        for name, value in group_metrics.items()
+    }
+    tracking_artifacts = _log_wandb_stage(
+        stage="compare_gold_iid",
+        metrics=flat_metrics,
+        paths={"comparison": comparison_path, "manifest": manifest_path},
+    )
+    write_experiment_markdown(
+        experiment_path,
+        purpose=(
+            f"Measure paired RMIA changes from gold-IID to target-generated "
+            f"non-members for {cfg.model.display_name}."
+        ),
+        hypothesis=str(cfg.experiment.hypothesis),
+        command=command,
+        overrides=[],
+        config_fingerprint_value=config_fingerprint(_resolved_config(cfg)),
+        git_state=collect_git_state(project_root),
+        environment=extended_environment(project_root),
+        artifacts={
+            "comparison": str(comparison_path),
+            "manifest": str(manifest_path),
+            **tracking_artifacts,
+        },
+        metrics=flat_metrics,
+        conclusion=(
+            "Differences use identical member IDs, source prompts, masks, population, "
+            "and paired bootstrap indices."
+        ),
+        achieved_purpose=True,
+        next_action="Validate all treatment and comparison lineage hashes.",
+        wandb_run_id=_active_wandb_run_id(),
+    )
 
 
 def run_mixed_distribution_control(
@@ -3223,6 +4176,505 @@ def _validate_mask_reuse_candidate_lineage(
     ):
         raise ValueError("Candidate manifest is not bound to the baseline masks.")
     return expected_record
+
+
+def _validate_target_generated_ablation_outputs(
+    cfg: DictConfig,
+    *,
+    project_root: Path,
+    command: str,
+) -> None:
+    root = model_root(cfg, project_root, smoke=False)
+    strategy = fine_tuning_strategy(cfg)
+    source_root, source_files = _validate_gold_iid_source(
+        cfg, project_root=project_root
+    )
+    paths = candidate_paths(cfg, project_root, smoke=False)
+    generated = _target_generated_generation_paths(cfg, project_root)
+    group_size = int(cfg.candidate_suite.group_size)
+    group_count = int(cfg.candidate_suite.nonmember_group_count)
+    expected_rows = group_size * (group_count + 1)
+    expected_shadow_count = int(cfg.shadow.count)
+    expected_included = [3001, 3088, 3064, 3051, 3071]
+    expected_filler = [40798, 40711, 40735, 40748, 40728]
+
+    generation_files = {
+        "public_generated": generated["public"],
+        "private_generated_labels": generated["private"],
+        "source_mapping": generated["mapping"],
+        "metrics": generated["metrics"],
+        "resolved_config": generated["resolved_config"],
+    }
+    if not _artifact_record_is_complete(
+        cfg,
+        generated["manifest"],
+        generation_files,
+        expected_row_counts={
+            "public_generated": group_size * group_count,
+            "private_generated_labels": group_size * group_count,
+            "source_mapping": group_size * group_count,
+        },
+    ):
+        raise ValueError("Target-generated artifacts failed final validation.")
+    generation_manifest = read_json(generated["manifest"])
+    generation_config = {
+        "do_sample": False,
+        "temperature": 0.0,
+        "max_new_tokens": 64,
+    }
+    if (
+        generation_manifest.get("generation_mode")
+        != "target_generated_squad_validation"
+        or generation_manifest.get("generation_config") != generation_config
+        or generation_manifest.get("source_candidate_sha256")
+        != {
+            name: file_sha256(source_files[name])
+            for name in (
+                "candidate_manifest",
+                "public_candidates",
+                "evaluator_mapping",
+                "shadow_masks",
+                "source_ids",
+            )
+        }
+        or generation_manifest.get("generator_target_sha256")
+        != _tree_file_sha256(root / "target")
+        or any(
+            int(value) != 0
+            for value in generation_manifest.get("forbidden_overlap", {}).values()
+        )
+    ):
+        raise ValueError("Target-generated lineage or generation settings differ.")
+
+    source_public = {
+        str(row["candidate_id"]): row
+        for row in read_jsonl(source_files["public_candidates"])
+    }
+    source_private = read_jsonl(source_files["evaluator_mapping"])
+    source_private_by_identity = {
+        (str(row["private_group"]), str(row["source_id"])): row
+        for row in source_private
+    }
+    mapping_rows = read_jsonl(generated["mapping"])
+    generated_private = read_jsonl(generated["private"])
+    if len(source_private_by_identity) != len(source_private):
+        raise ValueError("Gold-IID source identities are duplicated.")
+    generated_private_by_id = {
+        str(row["candidate_id"]): row for row in generated_private
+    }
+    if len(generated_private_by_id) != len(generated_private):
+        raise ValueError("Generated private candidate IDs are duplicated.")
+    seen_source_identities: set[tuple[str, str]] = set()
+    for row in mapping_rows:
+        source_group = str(row["source_group"])
+        destination_group = str(row["destination_group"])
+        source_id = str(row["source_id"])
+        identity = (source_group, source_id)
+        source = source_private_by_identity.get(identity)
+        generated_row = generated_private_by_id.get(str(row["generated_candidate_id"]))
+        if (
+            identity in seen_source_identities
+            or source is None
+            or generated_row is None
+            or str(source["candidate_id"]) != str(row["source_candidate_id"])
+            or str(generated_row["source_candidate_id"]) != str(source["candidate_id"])
+            or str(generated_row["source_id"]) != source_id
+            or str(generated_row["private_group"]) != destination_group
+            or text_sha256(str(source_public[str(source["candidate_id"])]["prompt"]))
+            != str(row["source_prompt_sha256"])
+        ):
+            raise ValueError(f"Generated provenance differs for {identity}.")
+        seen_source_identities.add(identity)
+    if len(seen_source_identities) != group_size * group_count:
+        raise ValueError("Generated source coverage is incomplete.")
+
+    source_ids_path = paths["manifest"].parent / "source_ids.json"
+    candidate_files = {
+        "raw_public_candidates": paths["raw_public"],
+        "raw_private_provenance": paths["raw_private"],
+        "public_candidates": paths["public"],
+        "evaluator_mapping": paths["private"],
+        "shadow_masks": paths["masks"],
+        "source_ids": source_ids_path,
+    }
+    if not _artifact_record_is_complete(
+        cfg,
+        paths["manifest"],
+        candidate_files,
+        expected_row_counts={
+            "raw_public_candidates": expected_rows,
+            "raw_private_provenance": expected_rows,
+            "public_candidates": expected_rows,
+            "evaluator_mapping": expected_rows,
+            "shadow_models": expected_shadow_count,
+        },
+    ):
+        raise ValueError("Target-generated candidate artifacts failed validation.")
+    public_rows = read_jsonl(paths["public"])
+    private_rows = read_jsonl(paths["private"])
+    if (
+        len({str(row["content_sha256"]) for row in public_rows}) != expected_rows
+        or len({str(row["candidate_id"]) for row in public_rows}) != expected_rows
+        or len({str(row["candidate_id"]) for row in private_rows}) != expected_rows
+    ):
+        raise ValueError("Target-generated candidates are not one-to-one and unique.")
+    group_counts = {
+        group: sum(str(row["private_group"]) == group for row in private_rows)
+        for group in (
+            "gold_squad_target_train",
+            *[
+                f"target_gen_squad_validation_{index:02d}"
+                for index in range(group_count)
+            ],
+        )
+    }
+    candidate_manifest = read_json(paths["manifest"])
+    if (
+        any(count != group_size for count in group_counts.values())
+        or candidate_manifest.get("candidate_source_mode")
+        != "target_generated_squad_validation"
+        or candidate_manifest.get("canonicalization_loss") != 0
+        or candidate_manifest.get("group_counts") != group_counts
+        or candidate_manifest.get("generation_manifest_sha256")
+        != file_sha256(generated["manifest"])
+    ):
+        raise ValueError("Target-generated candidate manifest differs.")
+
+    treatment_public = {str(row["candidate_id"]): row for row in public_rows}
+    source_members = {
+        str(row["candidate_id"]): row
+        for row in source_private
+        if str(row["private_group"]) == "gold_squad_target_train"
+    }
+    treatment_members = {
+        str(row["candidate_id"]): row
+        for row in private_rows
+        if str(row["private_group"]) == "gold_squad_target_train"
+    }
+    if source_members != treatment_members or any(
+        treatment_public[candidate] != source_public[candidate]
+        for candidate in source_members
+    ):
+        raise ValueError("Target-member candidates differ from gold-IID.")
+
+    source_masks = read_shadow_masks(source_files["shadow_masks"])
+    masks = read_shadow_masks(paths["masks"])
+    inherited = _inherit_target_generated_masks(
+        private_rows, source_private, source_masks, group_count=group_count
+    )
+    if masks != inherited or any(
+        len(mask) != expected_shadow_count or not 0 < sum(mask) < expected_shadow_count
+        for mask in masks.values()
+    ):
+        raise ValueError("Target-generated masks differ from source-aligned masks.")
+    included_counts = [
+        sum(mask[index] for mask in masks.values())
+        for index in range(expected_shadow_count)
+    ]
+    if included_counts != expected_included:
+        raise ValueError(f"Target-generated IN counts differ: {included_counts}")
+
+    reuse_manifest_path = root / "reuse" / "manifest.json"
+    reuse_manifest = read_json(reuse_manifest_path)
+    if (
+        reuse_manifest.get("mode") != "target_eval_only"
+        or reuse_manifest.get("artifact_sha256", {}).get("target")
+        != _tree_file_sha256(root / "target")
+        or reuse_manifest.get("artifact_sha256", {}).get("eval")
+        != _tree_file_sha256(root / "eval")
+        or _tree_file_sha256(root / "target")
+        != _tree_file_sha256(source_root / "target")
+        or _tree_file_sha256(root / "eval") != _tree_file_sha256(source_root / "eval")
+    ):
+        raise ValueError("Reused target/evaluation lineage differs from gold-IID.")
+
+    target_hashes = {
+        record_from_json(row).content_sha256
+        for row in read_jsonl(
+            root / "target" / f"seed_{int(cfg.runtime.seed)}" / "train_manifest.jsonl"
+        )
+    }
+    population_hashes = {
+        record.content_sha256
+        for record in load_split_file(cfg, project_root, "squad_validation_population")
+    }
+    treatment_hash_by_id = {
+        candidate: str(row["content_sha256"])
+        for candidate, row in treatment_public.items()
+    }
+    source_hash_by_id = {
+        candidate: str(row["content_sha256"])
+        for candidate, row in source_public.items()
+    }
+    treatment_candidate_hashes = set(treatment_hash_by_id.values())
+    source_candidate_hashes = set(source_hash_by_id.values())
+    shadow_records: dict[str, dict[str, str]] = {}
+    shadow_root = root / "shadows"
+    expected_shadow_names = {
+        f"shadow_{index:02d}" for index in range(expected_shadow_count)
+    }
+    if {
+        path.name for path in shadow_root.glob("shadow_*") if path.is_dir()
+    } != expected_shadow_names:
+        raise ValueError("Target-generated shadow directories differ.")
+    for index in range(expected_shadow_count):
+        run_dir = shadow_root / f"shadow_{index:02d}"
+        source_run = source_root / "shadows" / f"shadow_{index:02d}"
+        if (
+            not _training_run_is_complete(cfg, run_dir, strategy)
+            or not _run_config_matches(cfg, run_dir)
+            or not _training_run_is_complete(cfg, source_run, strategy)
+        ):
+            raise ValueError(f"Shadow training record is incomplete: {run_dir}")
+        included_ids = {
+            candidate for candidate, mask in masks.items() if mask[index] == 1
+        }
+        included_hashes = {
+            treatment_hash_by_id[candidate] for candidate in included_ids
+        }
+        train_rows = [
+            record_from_json(row)
+            for row in read_jsonl(run_dir / "train_manifest.jsonl")
+        ]
+        train_hashes = {row.content_sha256 for row in train_rows}
+        if (
+            len(train_rows) != int(cfg.shadow.train_size)
+            or len(train_hashes) != len(train_rows)
+            or train_hashes & treatment_candidate_hashes != included_hashes
+        ):
+            raise ValueError(f"Shadow size, uniqueness, or IN/OUT failed: {run_dir}")
+        filler_rows = [
+            row
+            for row in train_rows
+            if row.content_sha256 not in treatment_candidate_hashes
+        ]
+        source_rows = [
+            record_from_json(row)
+            for row in read_jsonl(source_run / "train_manifest.jsonl")
+        ]
+        source_filler_rows = [
+            row
+            for row in source_rows
+            if row.content_sha256 not in source_candidate_hashes
+        ]
+        if (
+            len(filler_rows) != expected_filler[index]
+            or [row.content_sha256 for row in filler_rows]
+            != [row.content_sha256 for row in source_filler_rows]
+            or {row.content_sha256 for row in filler_rows}
+            & (target_hashes | treatment_candidate_hashes | population_hashes)
+        ):
+            raise ValueError(f"Shadow filler lineage or exclusion failed: {run_dir}")
+        included_target_members = {
+            treatment_hash_by_id[candidate]
+            for candidate in treatment_members
+            if masks[candidate][index] == 1
+        }
+        source_included_target_members = {
+            source_hash_by_id[candidate]
+            for candidate in source_members
+            if source_masks[candidate][index] == 1
+        }
+        if included_target_members != source_included_target_members:
+            raise ValueError(f"Shadow target-member IN set differs: {run_dir}")
+        expected_summary = {
+            "shadow_index": index,
+            "included_candidates": expected_included[index],
+            "filled_from_auxiliary_pool": expected_filler[index],
+            "forbidden_target_overlap": 0,
+            "forbidden_candidate_overlap": 0,
+            "forbidden_population_overlap": 0,
+            "out_candidate_leakage": 0,
+            "train_size": int(cfg.shadow.train_size),
+        }
+        if read_json(run_dir / "inclusion_summary.json") != expected_summary:
+            raise ValueError(f"Shadow inclusion summary differs: {run_dir}")
+        shadow_records[f"shadow_{index:02d}"] = _tree_file_sha256(run_dir)
+
+    attack_dir = root / "attack"
+    attack_files = {
+        "scores": attack_dir / "online_rmia_scores.jsonl",
+        "metrics": attack_dir / "metrics.json",
+    }
+    attack_manifest_path = attack_dir / "manifest.json"
+    if not _artifact_record_is_complete(
+        cfg,
+        attack_manifest_path,
+        attack_files,
+        expected_row_counts={
+            "candidates": expected_rows,
+            "population": int(cfg.data.squad_validation_population_size),
+            "shadow_models": expected_shadow_count,
+        },
+    ):
+        raise ValueError("Target-generated attack artifacts failed validation.")
+    scores = read_jsonl(attack_files["scores"])
+    if len(scores) != expected_rows or any(
+        not math.isfinite(float(row["online_rmia_score"])) for row in scores
+    ):
+        raise ValueError("Target-generated RMIA scores are missing or non-finite.")
+    metrics = read_json(attack_files["metrics"])
+    metric_groups = [
+        *[f"target_gen_squad_validation_{index:02d}" for index in range(group_count)],
+        "target_gen_squad_validation_pooled",
+    ]
+    required_metric_keys = {
+        key
+        for group in metric_groups
+        for key in (
+            f"auc_gold_train_vs_{group}",
+            f"auc_ci_lower_gold_train_vs_{group}",
+            f"auc_ci_upper_gold_train_vs_{group}",
+            f"tpr_at_fpr_0.01_gold_train_vs_{group}",
+            f"tpr_at_fpr_0.01_ci_lower_gold_train_vs_{group}",
+            f"tpr_at_fpr_0.01_ci_upper_gold_train_vs_{group}",
+            f"tpr_at_fpr_0.05_gold_train_vs_{group}",
+            f"tpr_at_fpr_0.05_ci_lower_gold_train_vs_{group}",
+            f"tpr_at_fpr_0.05_ci_upper_gold_train_vs_{group}",
+        )
+    }
+    if not required_metric_keys.issubset(metrics):
+        raise ValueError("Target-generated RMIA metrics are incomplete.")
+
+    comparison_dir = root / "control" / "gold_iid"
+    comparison_path = comparison_dir / "comparison.json"
+    comparison_manifest_path = comparison_dir / "manifest.json"
+    if not _artifact_record_is_complete(
+        cfg,
+        comparison_manifest_path,
+        {"comparison": comparison_path},
+    ):
+        raise ValueError("Paired gold-IID comparison artifacts failed validation.")
+    comparison_manifest = read_json(comparison_manifest_path)
+    comparison = read_json(comparison_path)
+    comparison_lineage = comparison_manifest.get("comparison_lineage", {})
+    if (
+        comparison_manifest.get("comparison_kind")
+        != "paired_target_generated_minus_gold_iid"
+        or comparison.get("comparison") != "target_generated_minus_gold_iid"
+        or comparison.get("row_counts")
+        != {
+            "members": group_size,
+            "nonmembers_per_slice": group_size,
+            "pooled_nonmembers": group_size * group_count,
+        }
+        or comparison_lineage.get("source_scores_sha256")
+        != file_sha256(source_files["attack_scores"])
+        or comparison_lineage.get("treatment_scores_sha256")
+        != file_sha256(attack_files["scores"])
+        or len(comparison.get("metrics", {})) != group_count + 1
+    ):
+        raise ValueError("Paired gold-IID comparison lineage differs.")
+
+    analysis_dir = root / "analysis" / "relative_log_likelihood"
+    analysis_files = {
+        "figure": analysis_dir / "relative_log_likelihood_ecdf.png",
+        "sampled_candidates": analysis_dir / "sampled_candidates.jsonl",
+        "summary": analysis_dir / "summary.json",
+    }
+    sample_size = int(cfg.analysis.sample_size_per_group)
+    if not _artifact_record_is_complete(
+        cfg,
+        analysis_dir / "manifest.json",
+        analysis_files,
+        expected_row_counts={
+            "total": sample_size * (group_count + 1),
+            "gold_squad_target_train": sample_size,
+            **{
+                f"target_gen_squad_validation_{index:02d}": sample_size
+                for index in range(group_count)
+            },
+        },
+    ):
+        raise ValueError("Target-generated RMIA analysis artifacts failed validation.")
+
+    experiment_path = root / str(cfg.report.experiment_filename)
+    write_experiment_markdown(
+        experiment_path,
+        purpose=(
+            f"Complete the target-generated shadow-distribution RMIA ablation for "
+            f"{cfg.model.display_name}."
+        ),
+        hypothesis=str(cfg.experiment.hypothesis),
+        command=command,
+        overrides=[],
+        config_fingerprint_value=config_fingerprint(_resolved_config(cfg)),
+        git_state=collect_git_state(project_root),
+        environment=extended_environment(project_root),
+        artifacts={
+            "reuse_manifest": str(reuse_manifest_path.relative_to(project_root)),
+            "generation_manifest": str(generated["manifest"].relative_to(project_root)),
+            "candidate_manifest": str(paths["manifest"].relative_to(project_root)),
+            "attack_manifest": str(attack_manifest_path.relative_to(project_root)),
+            "comparison_manifest": str(
+                comparison_manifest_path.relative_to(project_root)
+            ),
+            "analysis_manifest": str(
+                (analysis_dir / "manifest.json").relative_to(project_root)
+            ),
+        },
+        metrics={
+            key: float(value) for key, value in metrics.items() if _is_number(value)
+        },
+        conclusion=(
+            "All target-generated treatment and paired gold-IID artifacts passed "
+            "count, leakage, source alignment, filler, lineage, and SHA256 validation."
+        ),
+        achieved_purpose=True,
+        next_action="Report paired generated-minus-gold changes for each slice and pooled.",
+        wandb_run_id=_active_wandb_run_id(),
+    )
+    completion_manifest_path = root / "completion_manifest.json"
+    completion_manifest = {
+        "config_sha256": config_fingerprint(_resolved_config(cfg)),
+        "semantic_config_sha256": _semantic_config_fingerprint(_resolved_config(cfg)),
+        "model": str(cfg.model.name_or_path),
+        "attack_method": "online_rmia",
+        "candidate_suite": "target_generated_squad_validation",
+        "shadow_models": expected_shadow_count,
+        "candidate_rows": expected_rows,
+        "generated_nonmembers": group_size * group_count,
+        "population_rows": int(cfg.data.squad_validation_population_size),
+        "reuse_manifest_sha256": file_sha256(reuse_manifest_path),
+        "generation_manifest_sha256": file_sha256(generated["manifest"]),
+        "candidate_manifest_sha256": file_sha256(paths["manifest"]),
+        "shadow_artifact_sha256": shadow_records,
+        "attack_artifact_sha256": {
+            **{name: file_sha256(path) for name, path in attack_files.items()},
+            "manifest": file_sha256(attack_manifest_path),
+        },
+        "comparison_artifact_sha256": {
+            "comparison": file_sha256(comparison_path),
+            "manifest": file_sha256(comparison_manifest_path),
+        },
+        "analysis_artifact_sha256": {
+            **{name: file_sha256(path) for name, path in analysis_files.items()},
+            "manifest": file_sha256(analysis_dir / "manifest.json"),
+        },
+        "source_gold_iid_sha256": {
+            "completion": file_sha256(source_files["completion"]),
+            "candidates": file_sha256(source_files["candidate_manifest"]),
+            "scores": file_sha256(source_files["attack_scores"]),
+        },
+        "experiment_sha256": file_sha256(experiment_path),
+    }
+    write_json(completion_manifest_path, completion_manifest)
+    success_path = root / "_SUCCESS"
+    success_path.write_text("verified\n", encoding="utf-8")
+    _log_wandb_stage(
+        stage="validation",
+        metrics={
+            "shadow_models": float(expected_shadow_count),
+            "candidate_rows": float(expected_rows),
+            "generated_nonmembers": float(group_size * group_count),
+            "population_rows": float(cfg.data.squad_validation_population_size),
+        },
+        paths={
+            "completion_manifest": completion_manifest_path,
+            "experiment": experiment_path,
+            "success": success_path,
+        },
+    )
 
 
 def _validate_iid_ablation_outputs(
@@ -3559,6 +5011,11 @@ def validate_formal_outputs(
     project_root: Path,
     command: str,
 ) -> None:
+    if _target_generated_ablation_enabled(cfg):
+        _validate_target_generated_ablation_outputs(
+            cfg, project_root=project_root, command=command
+        )
+        return
     if _iid_ablation_enabled(cfg):
         _validate_iid_ablation_outputs(cfg, project_root=project_root, command=command)
         return
@@ -4004,12 +5461,18 @@ def _plot_iid_rmia_feature_distribution(
     group_order = tuple(
         dict.fromkeys(str(row["private_group"]) for row in private_rows)
     )
+    generated_suite = _target_generated_ablation_enabled(cfg)
+    nonmember_prefix = (
+        "target_gen_squad_validation_" if generated_suite else "gold_squad_validation_"
+    )
     expected_groups = (
         "gold_squad_target_train",
-        *[f"gold_squad_validation_{index:02d}" for index in range(5)],
+        *[f"{nonmember_prefix}{index:02d}" for index in range(5)],
     )
     if group_order != expected_groups:
-        raise ValueError(f"Unexpected IID RMIA candidate groups: {group_order}")
+        raise ValueError(
+            f"Unexpected distribution-ablation RMIA candidate groups: {group_order}"
+        )
     sample_size = int(cfg.analysis.sample_size_per_group)
     sampled_rows = sample_group_feature_rows(
         score_rows,
@@ -4037,7 +5500,11 @@ def _plot_iid_rmia_feature_distribution(
         output_path=figure_path,
         dpi=int(cfg.analysis.figure_dpi),
         group_order=group_order,
-        title="Online RMIA feature distributions across IID SQuAD slices",
+        title=(
+            "Online RMIA feature distributions across target-generated SQuAD slices"
+            if generated_suite
+            else "Online RMIA feature distributions across IID SQuAD slices"
+        ),
         x_label="Target-versus-shadow relative log-likelihood",
     )
     artifacts = {
@@ -4081,7 +5548,13 @@ def _plot_iid_rmia_feature_distribution(
     )
     write_experiment_markdown(
         experiment_path,
-        purpose=f"Compare IID SQuAD RMIA feature distributions for {cfg.model.display_name}.",
+        purpose=(
+            f"Compare target-generated SQuAD RMIA feature distributions for "
+            f"{cfg.model.display_name}."
+            if generated_suite
+            else f"Compare IID SQuAD RMIA feature distributions for "
+            f"{cfg.model.display_name}."
+        ),
         hypothesis=str(cfg.experiment.hypothesis),
         command=command,
         overrides=[],
@@ -4094,7 +5567,13 @@ def _plot_iid_rmia_feature_distribution(
             **tracking_artifacts,
         },
         metrics=metrics,
-        conclusion="Every curve uses an equal-size deterministic sample from one gold SQuAD group.",
+        conclusion=(
+            "Every curve uses an equal-size deterministic sample; non-members are "
+            "target-generated completions aligned to the gold-IID source prompts."
+            if generated_suite
+            else "Every curve uses an equal-size deterministic sample from one gold "
+            "SQuAD group."
+        ),
         achieved_purpose=True,
         next_action="Interpret the five slices and their pooled attack metrics.",
         wandb_run_id=_active_wandb_run_id(),
@@ -4107,7 +5586,7 @@ def plot_rmia_feature_distribution(
     project_root: Path,
     command: str,
 ) -> None:
-    if _iid_ablation_enabled(cfg):
+    if _safe_distribution_ablation_enabled(cfg):
         _plot_iid_rmia_feature_distribution(
             cfg, project_root=project_root, command=command
         )
@@ -4511,16 +5990,16 @@ def attack_metrics(
         labels_by_id[candidate_id_value] = label
         group = str(row["private_group"])
         candidate_ids_by_group.setdefault(group, set()).add(candidate_id_value)
-    iid_groups = sorted(
-        group
-        for group in candidate_ids_by_group
-        if group.startswith("gold_squad_validation_")
-        and group.removeprefix("gold_squad_validation_").isdigit()
-    )
-    if len(iid_groups) > 1:
-        candidate_ids_by_group["gold_squad_validation_pooled"] = set().union(
-            *(candidate_ids_by_group[group] for group in iid_groups)
+    for prefix in ("gold_squad_validation_", "target_gen_squad_validation_"):
+        distribution_groups = sorted(
+            group
+            for group in candidate_ids_by_group
+            if group.startswith(prefix) and group.removeprefix(prefix).isdigit()
         )
+        if len(distribution_groups) > 1:
+            candidate_ids_by_group[f"{prefix}pooled"] = set().union(
+                *(candidate_ids_by_group[group] for group in distribution_groups)
+            )
     if set(score_by_id) != set(labels_by_id):
         raise ValueError("Scores and evaluator mapping candidate IDs must match.")
     positives = sorted(

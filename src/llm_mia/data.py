@@ -4,7 +4,7 @@ import csv
 import hashlib
 import json
 import random
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -460,6 +460,33 @@ def write_shadow_masks(
             row.update(
                 {f"shadow_{idx:02d}": include for idx, include in enumerate(mask)}
             )
+            writer.writerow(row)
+
+
+def write_explicit_shadow_masks(path: Path, masks: Mapping[str, Sequence[int]]) -> None:
+    if not masks:
+        raise ValueError("Explicit shadow masks must not be empty.")
+    shadow_count = len(next(iter(masks.values())))
+    if shadow_count < 2:
+        raise ValueError("Explicit masks require at least two shadows.")
+    if any(
+        len(mask) != shadow_count
+        or any(bit not in (0, 1) for bit in mask)
+        or not 0 < sum(mask) < shadow_count
+        for mask in masks.values()
+    ):
+        raise ValueError("Every explicit mask must have one bit per shadow and IN/OUT.")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["candidate_id"] + [
+        f"shadow_{index:02d}" for index in range(shadow_count)
+    ]
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        for candidate, mask in masks.items():
+            row: dict[str, str | int] = {"candidate_id": candidate}
+            row.update({f"shadow_{index:02d}": bit for index, bit in enumerate(mask)})
             writer.writerow(row)
 
 

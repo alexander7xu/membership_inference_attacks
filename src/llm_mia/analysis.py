@@ -208,3 +208,106 @@ def bootstrap_binary_metrics(
         result[f"tpr_at_fpr_{threshold}_ci_lower"] = lower
         result[f"tpr_at_fpr_{threshold}_ci_upper"] = upper
     return result
+
+
+def paired_bootstrap_binary_metric_differences(
+    treatment_positive_scores: Sequence[float],
+    treatment_negative_scores: Sequence[float],
+    control_positive_scores: Sequence[float],
+    control_negative_scores: Sequence[float],
+    *,
+    fpr_thresholds: Sequence[float],
+    samples: int,
+    seed: int,
+) -> dict[str, float]:
+    score_sets = (
+        treatment_positive_scores,
+        treatment_negative_scores,
+        control_positive_scores,
+        control_negative_scores,
+    )
+    if any(not scores for scores in score_sets):
+        raise ValueError("Paired bootstrap score sets must be non-empty.")
+    if len(treatment_positive_scores) != len(control_positive_scores) or len(
+        treatment_negative_scores
+    ) != len(control_negative_scores):
+        raise ValueError("Paired bootstrap treatment/control lengths must match.")
+    if samples <= 0:
+        raise ValueError("Bootstrap sample count must be positive.")
+    if any(
+        not math.isfinite(float(score)) for scores in score_sets for score in scores
+    ):
+        raise ValueError("Paired bootstrap scores must be finite.")
+
+    positive_count = len(treatment_positive_scores)
+    negative_count = len(treatment_negative_scores)
+    labels = [1] * positive_count + [0] * negative_count
+
+    def metrics(
+        positive_scores: Sequence[float], negative_scores: Sequence[float]
+    ) -> tuple[float, dict[float, float]]:
+        scores = [*positive_scores, *negative_scores]
+        return (
+            float(roc_auc_score(labels, scores)),
+            {
+                threshold: tpr_at_fpr(scores, labels, threshold)
+                for threshold in fpr_thresholds
+            },
+        )
+
+    treatment_auc, treatment_tpr = metrics(
+        treatment_positive_scores, treatment_negative_scores
+    )
+    control_auc, control_tpr = metrics(control_positive_scores, control_negative_scores)
+    result = {
+        "treatment_auc": treatment_auc,
+        "control_auc": control_auc,
+        "auc_difference": treatment_auc - control_auc,
+    }
+    for threshold in fpr_thresholds:
+        prefix = f"tpr_at_fpr_{threshold}"
+        result[f"treatment_{prefix}"] = treatment_tpr[threshold]
+        result[f"control_{prefix}"] = control_tpr[threshold]
+        result[f"{prefix}_difference"] = (
+            treatment_tpr[threshold] - control_tpr[threshold]
+        )
+
+    rng = random.Random(seed)
+    auc_differences: list[float] = []
+    tpr_differences = {threshold: [] for threshold in fpr_thresholds}
+    for _ in range(samples):
+        positive_indices = [
+            rng.randrange(positive_count) for _ in range(positive_count)
+        ]
+        negative_indices = [
+            rng.randrange(negative_count) for _ in range(negative_count)
+        ]
+        treatment_auc_sample, treatment_tpr_sample = metrics(
+            [treatment_positive_scores[index] for index in positive_indices],
+            [treatment_negative_scores[index] for index in negative_indices],
+        )
+        control_auc_sample, control_tpr_sample = metrics(
+            [control_positive_scores[index] for index in positive_indices],
+            [control_negative_scores[index] for index in negative_indices],
+        )
+        auc_differences.append(treatment_auc_sample - control_auc_sample)
+        for threshold in fpr_thresholds:
+            tpr_differences[threshold].append(
+                treatment_tpr_sample[threshold] - control_tpr_sample[threshold]
+            )
+
+    def interval(values: Sequence[float]) -> tuple[float, float]:
+        ordered = sorted(values)
+        lower = ordered[int(0.025 * (len(ordered) - 1))]
+        upper = ordered[int(0.975 * (len(ordered) - 1))]
+        return float(lower), float(upper)
+
+    auc_lower, auc_upper = interval(auc_differences)
+    result["auc_difference_ci_lower"] = auc_lower
+    result["auc_difference_ci_upper"] = auc_upper
+    for threshold, values in tpr_differences.items():
+        lower, upper = interval(values)
+        prefix = f"tpr_at_fpr_{threshold}_difference"
+        result[f"{prefix}_ci_lower"] = lower
+        result[f"{prefix}_ci_upper"] = upper
+    return result

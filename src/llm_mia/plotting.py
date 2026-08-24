@@ -40,6 +40,7 @@ for source, gold_group, source_suffix in _SOURCE_ROWS:
     GROUP_SOURCE[f"fullft_gen_from_{source_suffix}"] = source
 for index in range(5):
     GROUP_SOURCE[f"gold_squad_validation_{index:02d}"] = "squad_validation"
+    GROUP_SOURCE[f"target_gen_squad_validation_{index:02d}"] = "squad_validation"
 
 GROUP_VARIANT = {
     group: (
@@ -87,6 +88,14 @@ IID_GROUP_COLORS = {
     "gold_squad_validation_02": "#2E7D32",
     "gold_squad_validation_03": "#EF6C00",
     "gold_squad_validation_04": "#00838F",
+}
+TARGET_GENERATED_GROUP_COLORS = {
+    "gold_squad_target_train": "#C62828",
+    "target_gen_squad_validation_00": "#1565C0",
+    "target_gen_squad_validation_01": "#6A1B9A",
+    "target_gen_squad_validation_02": "#2E7D32",
+    "target_gen_squad_validation_03": "#EF6C00",
+    "target_gen_squad_validation_04": "#00838F",
 }
 
 
@@ -268,7 +277,13 @@ def plot_group_feature_ecdf(
 
     figure, axis = plt.subplots(figsize=(12.5, 6.4))
     figure.subplots_adjust(right=0.76)
-    iid_suite = set(group_order) == set(IID_GROUP_COLORS)
+    distribution_colors = (
+        IID_GROUP_COLORS
+        if set(group_order) == set(IID_GROUP_COLORS)
+        else TARGET_GENERATED_GROUP_COLORS
+        if set(group_order) == set(TARGET_GENERATED_GROUP_COLORS)
+        else None
+    )
     group_counts: set[int] = set()
     for group in group_order:
         values = sorted(
@@ -285,8 +300,10 @@ def plot_group_feature_ecdf(
             cumulative,
             where="post",
             linewidth=2.0,
-            linestyle="-" if iid_suite else VARIANT_LINESTYLES[variant],
-            color=IID_GROUP_COLORS[group] if iid_suite else SOURCE_COLORS[source],
+            linestyle="-" if distribution_colors else VARIANT_LINESTYLES[variant],
+            color=distribution_colors[group]
+            if distribution_colors
+            else SOURCE_COLORS[source],
         )
 
     if len(group_counts) != 1:
@@ -307,11 +324,21 @@ def plot_group_feature_ecdf(
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
 
-    if iid_suite:
+    if distribution_colors:
+        generated_suite = distribution_colors is TARGET_GENERATED_GROUP_COLORS
+        prefix = (
+            "target_gen_squad_validation_"
+            if generated_suite
+            else "gold_squad_validation_"
+        )
         labels = {
             "gold_squad_target_train": "Target members",
             **{
-                f"gold_squad_validation_{index:02d}": f"Validation slice {index:02d}"
+                f"{prefix}{index:02d}": (
+                    f"Target-generated slice {index:02d}"
+                    if generated_suite
+                    else f"Validation slice {index:02d}"
+                )
                 for index in range(5)
             },
         }
@@ -320,13 +347,13 @@ def plot_group_feature_ecdf(
                 Line2D(
                     [0],
                     [0],
-                    color=IID_GROUP_COLORS[group],
+                    color=distribution_colors[group],
                     linewidth=2.4,
                     label=labels[group],
                 )
                 for group in group_order
             ],
-            title="Gold SQuAD group",
+            title=("Generated SQuAD group" if generated_suite else "Gold SQuAD group"),
             loc="upper left",
             bbox_to_anchor=(1.01, 1.0),
             frameon=False,
