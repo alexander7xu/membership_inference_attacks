@@ -265,6 +265,122 @@ def build_squad_validation_iid_groups(
     return groups
 
 
+def replace_duplicate_iid_prompts(
+    groups: Mapping[str, Sequence[QARecord]],
+    *,
+    validation_rows: Sequence[QARecord],
+    forbidden_rows: Sequence[QARecord],
+    replacements: Sequence[Mapping[str, str]],
+    seed: int,
+    namespace: str,
+) -> tuple[dict[str, list[QARecord]], list[dict[str, Any]], dict[str, Any]]:
+    """Replace known duplicate prompts with deterministic unused validation rows."""
+    result = {name: list(rows) for name, rows in groups.items()}
+    original_rows = [row for rows in result.values() for row in rows]
+    excluded_rows = [*original_rows, *forbidden_rows]
+    excluded_ids = {row.record_id for row in excluded_rows}
+    excluded_content_hashes = {row.content_sha256 for row in excluded_rows}
+    excluded_prompt_hashes = {text_sha256(row.prompt) for row in excluded_rows}
+    exclusion_hashes = {
+        "excluded_source_ids_sha256": text_sha256("\n".join(sorted(excluded_ids))),
+        "excluded_content_sha256": text_sha256(
+            "\n".join(sorted(excluded_content_hashes))
+        ),
+        "excluded_prompt_sha256": text_sha256(
+            "\n".join(sorted(excluded_prompt_hashes))
+        ),
+    }
+
+    ordered = sorted(
+        validation_rows,
+        key=lambda row: stable_hash_int(seed, f"{namespace}:{row.record_id}"),
+    )
+    selected: list[QARecord] = []
+    for row in ordered:
+        prompt_hash = text_sha256(row.prompt)
+        if (
+            row.record_id in excluded_ids
+            or row.content_sha256 in excluded_content_hashes
+            or prompt_hash in excluded_prompt_hashes
+        ):
+            continue
+        selected.append(row)
+        excluded_ids.add(row.record_id)
+        excluded_content_hashes.add(row.content_sha256)
+        excluded_prompt_hashes.add(prompt_hash)
+        if len(selected) == len(replacements):
+            break
+    if len(selected) != len(replacements):
+        raise ValueError("SQuAD validation cannot supply prompt-unique replacements.")
+
+    provenance: list[dict[str, Any]] = []
+    for spec, replacement in zip(replacements, selected, strict=True):
+        group = str(spec["group"])
+        source_id = str(spec["source_id"])
+        retained_group = str(spec["retained_group"])
+        retained_source_id = str(spec["retained_source_id"])
+        if group not in result or retained_group not in result:
+            raise ValueError("Prompt replacement references an unknown group.")
+        positions = [
+            index
+            for index, row in enumerate(result[group])
+            if row.record_id == source_id
+        ]
+        retained = [
+            row for row in result[retained_group] if row.record_id == retained_source_id
+        ]
+        if len(positions) != 1 or len(retained) != 1:
+            raise ValueError(
+                "Prompt replacement source identity is missing or duplicated."
+            )
+        position = positions[0]
+        removed = result[group][position]
+        removed_prompt_hash = text_sha256(removed.prompt)
+        if removed_prompt_hash != text_sha256(retained[0].prompt):
+            raise ValueError("Prompt replacement source is not the declared duplicate.")
+        result[group][position] = replacement
+        provenance.append(
+            {
+                "group": group,
+                "position": position,
+                "reason": "duplicate_prompt_hash",
+                "removed_source_id": removed.record_id,
+                "retained_group": retained_group,
+                "retained_source_id": retained[0].record_id,
+                "replacement_source_id": replacement.record_id,
+                "removed_prompt_sha256": removed_prompt_hash,
+                "replacement_prompt_sha256": text_sha256(replacement.prompt),
+                "removed_content_sha256": removed.content_sha256,
+                "replacement_content_sha256": replacement.content_sha256,
+            }
+        )
+
+    final_rows = [row for rows in result.values() for row in rows]
+    if (
+        len(final_rows) != len(original_rows)
+        or len({row.record_id for row in final_rows}) != len(final_rows)
+        or len({row.content_sha256 for row in final_rows}) != len(final_rows)
+        or len({text_sha256(row.prompt) for row in final_rows}) != len(final_rows)
+    ):
+        raise ValueError("Prompt replacements did not produce unique IID groups.")
+    audit = {
+        "seed": seed,
+        "namespace": namespace,
+        "algorithm": "stable_sha256(seed:namespace:record_id)",
+        "replacement_count": len(provenance),
+        "before_prompt_count": len(original_rows),
+        "before_unique_prompt_count": len(
+            {text_sha256(row.prompt) for row in original_rows}
+        ),
+        "after_prompt_count": len(final_rows),
+        "after_unique_prompt_count": len(
+            {text_sha256(row.prompt) for row in final_rows}
+        ),
+        **exclusion_hashes,
+    }
+    return result, provenance, audit
+
+
 def record_to_json(record: QARecord) -> dict[str, Any]:
     data = asdict(record)
     data["answers"] = list(record.answers)

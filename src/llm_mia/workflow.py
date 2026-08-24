@@ -50,6 +50,7 @@ from src.llm_mia.data import (
     record_from_json,
     record_from_public_candidate,
     record_to_json,
+    replace_duplicate_iid_prompts,
     split_records,
     split_squad_train,
     squad_row_to_record,
@@ -1572,6 +1573,31 @@ def generation_metrics(
     }
 
 
+def _validate_unique_generation_source_prompts(
+    source_public: dict[str, dict[str, Any]],
+    source_private: list[dict[str, Any]],
+    *,
+    expected_rows: int,
+) -> None:
+    source_nonmembers = [
+        row
+        for row in source_private
+        if str(row["private_group"]).startswith("gold_squad_validation_")
+    ]
+    try:
+        prompt_hashes = [
+            text_sha256(str(source_public[str(row["candidate_id"])]["prompt"]))
+            for row in source_nonmembers
+        ]
+    except KeyError as error:
+        raise ValueError("Gold-IID generation source candidate is missing.") from error
+    if (
+        len(source_nonmembers) != expected_rows
+        or len(set(prompt_hashes)) != expected_rows
+    ):
+        raise ValueError("Gold-IID generation source prompts must be globally unique.")
+
+
 def _generate_target_generated_validation_candidates(
     cfg: DictConfig, *, project_root: Path, command: str
 ) -> None:
@@ -1645,6 +1671,9 @@ def _generate_target_generated_validation_candidates(
             raise ValueError(f"Duplicate gold-IID source identity: {key}")
         source_rows[key] = row
     source_ids = read_json(source_files["source_ids"])
+    _validate_unique_generation_source_prompts(
+        source_public, source_private, expected_rows=expected_rows
+    )
 
     target_manifest = (
         target_root / f"seed_{int(cfg.runtime.seed)}" / "train_manifest.jsonl"
@@ -2381,6 +2410,43 @@ def _safe_distribution_ablation_enabled(cfg: DictConfig) -> bool:
     return _iid_ablation_enabled(cfg) or _target_generated_ablation_enabled(cfg)
 
 
+def _inherit_iid_prompt_replacement_masks(
+    destination_private: list[dict[str, Any]],
+    source_private: list[dict[str, Any]],
+    source_masks: dict[str, list[int]],
+    replacements: list[dict[str, Any]],
+) -> dict[str, list[int]]:
+    source_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in source_private:
+        identity = (str(row["private_group"]), str(row["source_id"]))
+        if identity in source_by_identity:
+            raise ValueError("Prompt replacement source identity is duplicated.")
+        source_by_identity[identity] = row
+    replacement_by_identity = {
+        (str(row["group"]), str(row["replacement_source_id"])): row
+        for row in replacements
+    }
+    if len(replacement_by_identity) != len(replacements):
+        raise ValueError("Prompt replacement destination identity is duplicated.")
+
+    result: dict[str, list[int]] = {}
+    for row in destination_private:
+        candidate = str(row["candidate_id"])
+        identity = (str(row["private_group"]), str(row["source_id"]))
+        source = source_by_identity.get(identity)
+        replacement = replacement_by_identity.get(identity)
+        if source is not None:
+            source_candidate = str(source["candidate_id"])
+        elif replacement is not None:
+            source_candidate = str(replacement["removed_candidate_id"])
+        else:
+            raise ValueError(f"Prompt replacement mask source is missing: {identity}")
+        if candidate in result or source_candidate not in source_masks:
+            raise ValueError("Prompt replacement masks are incomplete or duplicated.")
+        result[candidate] = list(source_masks[source_candidate])
+    return result
+
+
 def _inherit_target_generated_masks(
     destination_private: list[dict[str, Any]],
     source_private: list[dict[str, Any]],
@@ -2620,6 +2686,35 @@ def _build_squad_validation_iid_candidates(
     group_size = int(cfg.candidate_suite.group_size)
     group_count = int(cfg.candidate_suite.nonmember_group_count)
     expected_rows = group_size * (group_count + 1)
+    replacement_enabled = bool(
+        OmegaConf.select(
+            cfg, "candidate_suite.prompt_replacements.enabled", default=False
+        )
+    )
+    current_replacement_source_hashes: dict[str, str] = {}
+    if replacement_enabled:
+        replacement_root = (
+            project_root
+            / str(cfg.candidate_suite.prompt_replacements.source_output_root)
+            / str(cfg.model.key)
+        )
+        replacement_files = {
+            "completion": replacement_root / "completion_manifest.json",
+            "candidate_manifest": replacement_root / "candidates" / "manifest.json",
+            "public_candidates": replacement_root
+            / "candidates"
+            / "public_candidates.jsonl",
+            "evaluator_mapping": replacement_root
+            / "candidates"
+            / "evaluator_mapping.jsonl",
+            "shadow_masks": replacement_root / "candidates" / "shadow_masks.csv",
+            "source_ids": replacement_root / "candidates" / "source_ids.json",
+        }
+        current_replacement_source_hashes = {
+            name: file_sha256(path)
+            for name, path in replacement_files.items()
+            if path.is_file()
+        }
     control_root = (
         project_root
         / str(cfg.control.source_output_root)
@@ -2654,6 +2749,16 @@ def _build_squad_validation_iid_candidates(
             and len(current_control_hashes) == len(control_source_files)
             and existing_manifest.get("safe_control", {}).get("source_candidate_sha256")
             == current_control_hashes
+            and (
+                not replacement_enabled
+                or (
+                    len(current_replacement_source_hashes) == 6
+                    and existing_manifest.get("prompt_replacements", {}).get(
+                        "source_artifact_sha256"
+                    )
+                    == current_replacement_source_hashes
+                )
+            )
         ):
             LOGGER.info("Reusing IID SQuAD candidate set: %s", paths["manifest"])
             return
@@ -2684,13 +2789,12 @@ def _build_squad_validation_iid_candidates(
         )
 
     target_source = load_split_file(cfg, project_root, "squad_target_train")
-    target_group = materialize(
-        deterministic_subset(
-            target_source,
-            seed=int(cfg.runtime.seed),
-            limit=group_size,
-            namespace="gold_squad_target_train",
-        )
+    materialized_target_source = materialize(target_source)
+    target_group = deterministic_subset(
+        materialized_target_source,
+        seed=int(cfg.runtime.seed),
+        limit=group_size,
+        namespace="gold_squad_target_train",
     )
     baseline_validation = materialize(
         deterministic_subset(
@@ -2708,11 +2812,121 @@ def _build_squad_validation_iid_candidates(
         validation_rows,
         baseline_candidates=baseline_validation,
         population=population,
-        target_train=materialize(target_source),
+        target_train=materialized_target_source,
         seed=int(cfg.runtime.seed),
         group_size=group_size,
         group_count=group_count,
     )
+
+    replacement_manifest: dict[str, Any] | None = None
+    replacement_source_masks: dict[str, list[int]] | None = None
+    replacement_source_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    replacement_by_new_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    if replacement_enabled:
+        source_cfg = deepcopy(cfg)
+        source_cfg.control.source_output_root = str(
+            cfg.candidate_suite.prompt_replacements.source_output_root
+        )
+        source_root, source_files = _validate_gold_iid_source(
+            source_cfg, project_root=project_root, require_current_target=False
+        )
+        original_ordered_groups = [
+            ("gold_squad_target_train", target_group),
+            *groups.items(),
+        ]
+        expected_source_ids = {
+            name: [record.record_id for record in rows]
+            for name, rows in original_ordered_groups
+        }
+        if read_json(source_files["source_ids"]) != expected_source_ids:
+            raise ValueError(
+                "Prompt replacement source IDs differ from the rebuilt IID suite."
+            )
+        source_public = {
+            str(row["candidate_id"]): row
+            for row in read_jsonl(source_files["public_candidates"])
+        }
+        source_private = read_jsonl(source_files["evaluator_mapping"])
+        replacement_source_by_identity = {
+            (str(row["private_group"]), str(row["source_id"])): row
+            for row in source_private
+        }
+        if len(replacement_source_by_identity) != expected_rows:
+            raise ValueError("Prompt replacement source identities are duplicated.")
+        for group_name, rows in original_ordered_groups:
+            for record in rows:
+                source = replacement_source_by_identity.get(
+                    (group_name, record.record_id)
+                )
+                if source is None:
+                    raise ValueError("Prompt replacement source candidate is missing.")
+                candidate = str(source["candidate_id"])
+                if source_public.get(candidate) != public_candidate(record, candidate):
+                    raise ValueError(
+                        "Prompt replacement source candidate content differs."
+                    )
+        replacement_source_masks = read_shadow_masks(source_files["shadow_masks"])
+        replacement_specs = [
+            dict(item)
+            for item in OmegaConf.to_container(
+                cfg.candidate_suite.prompt_replacements.records, resolve=True
+            )
+        ]
+        auxiliary_rows = materialize(
+            load_split_file(cfg, project_root, "squad_attacker_auxiliary_pool")
+        )
+        groups, replacement_records, replacement_audit = replace_duplicate_iid_prompts(
+            groups,
+            validation_rows=validation_rows,
+            forbidden_rows=[
+                *materialized_target_source,
+                *population,
+                *auxiliary_rows,
+            ],
+            replacements=replacement_specs,
+            seed=int(cfg.candidate_suite.prompt_replacements.seed),
+            namespace=str(cfg.candidate_suite.prompt_replacements.namespace),
+        )
+        expected_before = int(
+            cfg.candidate_suite.prompt_replacements.expected_unique_prompts_before
+        )
+        expected_after = int(
+            cfg.candidate_suite.prompt_replacements.expected_unique_prompts_after
+        )
+        if (
+            replacement_audit["before_unique_prompt_count"] != expected_before
+            or replacement_audit["after_unique_prompt_count"] != expected_after
+        ):
+            raise ValueError("Prompt replacement uniqueness counts differ.")
+        for record in replacement_records:
+            old_identity = (
+                str(record["group"]),
+                str(record["removed_source_id"]),
+            )
+            source = replacement_source_by_identity[old_identity]
+            old_candidate = str(source["candidate_id"])
+            inherited_mask = replacement_source_masks[old_candidate]
+            record["removed_candidate_id"] = old_candidate
+            record["inherited_mask"] = list(inherited_mask)
+            replacement_by_new_identity[
+                (str(record["group"]), str(record["replacement_source_id"]))
+            ] = record
+        replacement_manifest = {
+            **replacement_audit,
+            "source_root": str(source_root.relative_to(project_root)),
+            "source_artifact_sha256": {
+                name: file_sha256(source_files[name])
+                for name in (
+                    "completion",
+                    "candidate_manifest",
+                    "public_candidates",
+                    "evaluator_mapping",
+                    "shadow_masks",
+                    "source_ids",
+                )
+            },
+            "replacements": replacement_records,
+        }
 
     raw_public_rows: list[dict[str, Any]] = []
     raw_private_rows: list[dict[str, Any]] = []
@@ -2755,19 +2969,43 @@ def _build_squad_validation_iid_candidates(
     write_jsonl(paths["raw_private"], raw_private_rows)
     write_jsonl(paths["public"], public_rows)
     write_jsonl(paths["private"], private_rows)
-    write_shadow_masks(
-        paths["masks"],
-        [str(row["candidate_id"]) for row in public_rows],
-        seed=int(cfg.runtime.seed) + int(cfg.shadow.seed_offset),
-        shadow_count=shadow_count(cfg, smoke=False),
-        inclusion_probability=float(cfg.shadow.inclusion_probability),
-    )
+    if replacement_manifest is not None:
+        if replacement_source_masks is None:
+            raise AssertionError("Prompt replacement source masks were not loaded.")
+        explicit_masks = _inherit_iid_prompt_replacement_masks(
+            private_rows,
+            list(replacement_source_by_identity.values()),
+            replacement_source_masks,
+            list(replacement_by_new_identity.values()),
+        )
+        write_explicit_shadow_masks(paths["masks"], explicit_masks)
+    else:
+        write_shadow_masks(
+            paths["masks"],
+            [str(row["candidate_id"]) for row in public_rows],
+            seed=int(cfg.runtime.seed) + int(cfg.shadow.seed_offset),
+            shadow_count=shadow_count(cfg, smoke=False),
+            inclusion_probability=float(cfg.shadow.inclusion_probability),
+        )
     masks = read_shadow_masks(paths["masks"])
     if any(
         sum(mask) not in range(1, shadow_count(cfg, smoke=False))
         for mask in masks.values()
     ):
         raise ValueError("Every IID candidate must have both IN and OUT shadows.")
+    included_candidates = [
+        sum(mask[index] for mask in masks.values())
+        for index in range(shadow_count(cfg, smoke=False))
+    ]
+    if replacement_manifest is not None:
+        expected_included = list(
+            cfg.candidate_suite.prompt_replacements.expected_included_by_shadow
+        )
+        if included_candidates != expected_included:
+            raise ValueError(
+                f"Prompt replacement IN counts differ: {included_candidates}"
+            )
+        replacement_manifest["included_candidates_by_shadow"] = included_candidates
 
     control_public_path = control_source_files["public_candidates"]
     control_private_path = control_source_files["evaluator_mapping"]
@@ -2850,10 +3088,12 @@ def _build_squad_validation_iid_candidates(
                 "source_candidate_sha256": current_control_hashes,
                 "shared_masks_verified": True,
             },
-            "included_candidates_by_shadow": [
-                sum(mask[index] for mask in masks.values())
-                for index in range(shadow_count(cfg, smoke=False))
-            ],
+            "included_candidates_by_shadow": included_candidates,
+            **(
+                {"prompt_replacements": replacement_manifest}
+                if replacement_manifest is not None
+                else {}
+            ),
         }
     )
     write_json(paths["manifest"], manifest)
@@ -4746,6 +4986,71 @@ def _validate_iid_ablation_outputs(
         for mask in masks.values()
     ):
         raise ValueError("IID candidate masks are incomplete or invalid.")
+    replacement_enabled = bool(
+        OmegaConf.select(
+            cfg, "candidate_suite.prompt_replacements.enabled", default=False
+        )
+    )
+    if replacement_enabled:
+        replacement = candidate_manifest.get("prompt_replacements", {})
+        if (
+            replacement.get("replacement_count")
+            != len(cfg.candidate_suite.prompt_replacements.records)
+            or replacement.get("before_unique_prompt_count")
+            != int(
+                cfg.candidate_suite.prompt_replacements.expected_unique_prompts_before
+            )
+            or replacement.get("after_unique_prompt_count")
+            != int(
+                cfg.candidate_suite.prompt_replacements.expected_unique_prompts_after
+            )
+            or replacement.get("included_candidates_by_shadow")
+            != list(cfg.candidate_suite.prompt_replacements.expected_included_by_shadow)
+        ):
+            raise ValueError("Prompt replacement manifest counts differ.")
+        nonmember_ids = {
+            str(row["candidate_id"])
+            for row in private_rows
+            if str(row["private_group"]).startswith("gold_squad_validation_")
+        }
+        if (
+            len(
+                {
+                    text_sha256(str(candidate_by_id[candidate]["prompt"]))
+                    for candidate in nonmember_ids
+                }
+            )
+            != group_size * group_count
+        ):
+            raise ValueError("Prompt-unique IID candidates contain duplicate prompts.")
+        source_cfg = deepcopy(cfg)
+        source_cfg.control.source_output_root = str(
+            cfg.candidate_suite.prompt_replacements.source_output_root
+        )
+        _, replacement_source_files = _validate_gold_iid_source(
+            source_cfg, project_root=project_root, require_current_target=False
+        )
+        source_hashes = {
+            name: file_sha256(replacement_source_files[name])
+            for name in (
+                "completion",
+                "candidate_manifest",
+                "public_candidates",
+                "evaluator_mapping",
+                "shadow_masks",
+                "source_ids",
+            )
+        }
+        if replacement.get("source_artifact_sha256") != source_hashes:
+            raise ValueError("Prompt replacement source artifact hashes differ.")
+        inherited_masks = _inherit_iid_prompt_replacement_masks(
+            private_rows,
+            read_jsonl(replacement_source_files["evaluator_mapping"]),
+            read_shadow_masks(replacement_source_files["shadow_masks"]),
+            list(replacement["replacements"]),
+        )
+        if masks != inherited_masks:
+            raise ValueError("Prompt replacement masks differ from source lineage.")
 
     reuse_manifest_path = root / "reuse" / "manifest.json"
     reuse_manifest = read_json(reuse_manifest_path)

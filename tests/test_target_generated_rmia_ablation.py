@@ -11,6 +11,7 @@ from src.llm_mia.plotting import (
 )
 from src.llm_mia.workflow import (
     _inherit_target_generated_masks,
+    _validate_unique_generation_source_prompts,
     attack_metrics,
 )
 
@@ -275,4 +276,51 @@ def test_target_generated_config_and_runners_preserve_scientific_settings() -> N
     assert (
         "exec bash ./scripts/run_squad_lora_rmia_target_generated_ablation_formal.sh "
         "$model" in submitter
+    )
+
+
+def test_target_generation_rejects_duplicate_source_prompts_before_loading_model() -> (
+    None
+):
+    public = {
+        "a": {"prompt": "same prompt"},
+        "b": {"prompt": "same prompt"},
+    }
+    private = [
+        {
+            "candidate_id": candidate,
+            "private_group": f"gold_squad_validation_0{index}",
+        }
+        for index, candidate in enumerate(("a", "b"))
+    ]
+
+    with pytest.raises(ValueError, match="globally unique"):
+        _validate_unique_generation_source_prompts(public, private, expected_rows=2)
+
+
+def test_prompt_unique_target_generated_config_and_runners() -> None:
+    config = OmegaConf.load(
+        "conf/squad_lora_rmia_target_generated_prompt_unique_ablation.yaml"
+    )
+    source_root = "outputs/squad_lora_rmia_iid_prompt_unique_control/formal"
+    assert config.paths.output_root == (
+        "outputs/squad_lora_rmia_target_generated_prompt_unique_ablation"
+    )
+    assert config.reuse.source_output_root == source_root
+    assert config.control.source_output_root == source_root
+    assert config.shadow.count == 5
+    assert config.train.epochs == 1
+    assert config.attack.method == "online_rmia"
+
+    runner = Path(
+        "scripts/run_squad_lora_rmia_target_generated_prompt_unique_ablation_formal.sh"
+    ).read_text(encoding="utf-8")
+    assert "squad_lora_rmia_target_generated_prompt_unique_ablation" in runner
+    submitter = Path(
+        "scripts/submit_squad_lora_rmia_target_generated_prompt_unique_ablation.sh"
+    ).read_text(encoding="utf-8")
+    assert 'dependency_args+=(--dependency="afterok:$AFTEROK_JOB_ID")' in submitter
+    assert (
+        "run_squad_lora_rmia_target_generated_prompt_unique_ablation_formal.sh"
+        in submitter
     )

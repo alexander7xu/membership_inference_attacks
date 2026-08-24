@@ -6,9 +6,13 @@ from src.llm_mia.data import (
     QARecord,
     build_squad_validation_iid_groups,
     canonicalize_candidate_rows,
+    replace_duplicate_iid_prompts,
 )
 from src.llm_mia.plotting import IID_GROUP_COLORS, plot_group_feature_ecdf
-from src.llm_mia.workflow import attack_metrics
+from src.llm_mia.workflow import (
+    _inherit_iid_prompt_replacement_masks,
+    attack_metrics,
+)
 
 
 def _unique_records(prefix: str, count: int, *, split: str) -> list[QARecord]:
@@ -62,6 +66,144 @@ def test_iid_validation_groups_are_deterministic_exact_and_disjoint() -> None:
     assert len({record.content_sha256 for record in selected}) == 6
     forbidden = {record.content_sha256 for record in [*population, *target]}
     assert not ({record.content_sha256 for record in selected} & forbidden)
+
+
+def test_prompt_unique_replacements_are_deterministic_and_preserve_positions() -> None:
+    def record(record_id: str, prompt: str) -> QARecord:
+        return QARecord(
+            record_id=record_id,
+            dataset="squad",
+            split="validation",
+            prompt=prompt,
+            completion=f" answer-{record_id}",
+            answers=(f"answer-{record_id}",),
+        )
+
+    retained_a = record("retained-a", "duplicate prompt a")
+    removed_a = record("removed-a", "duplicate prompt a")
+    retained_b = record("retained-b", "duplicate prompt b")
+    removed_b = record("removed-b", "duplicate prompt b")
+    groups = {
+        "gold_squad_validation_00": [record("base", "base prompt")],
+        "gold_squad_validation_01": [retained_a],
+        "gold_squad_validation_02": [record("middle", "middle prompt")],
+        "gold_squad_validation_03": [retained_b],
+        "gold_squad_validation_04": [removed_a, removed_b],
+    }
+    replacement_a = record("replacement-a", "replacement prompt a")
+    replacement_b = record("replacement-b", "replacement prompt b")
+    specs = [
+        {
+            "group": "gold_squad_validation_04",
+            "source_id": "removed-a",
+            "retained_group": "gold_squad_validation_01",
+            "retained_source_id": "retained-a",
+        },
+        {
+            "group": "gold_squad_validation_04",
+            "source_id": "removed-b",
+            "retained_group": "gold_squad_validation_03",
+            "retained_source_id": "retained-b",
+        },
+    ]
+
+    first = replace_duplicate_iid_prompts(
+        groups,
+        validation_rows=[*sum(groups.values(), []), replacement_a, replacement_b],
+        forbidden_rows=[],
+        replacements=specs,
+        seed=42,
+        namespace="test-replacements",
+    )
+    second = replace_duplicate_iid_prompts(
+        groups,
+        validation_rows=[*sum(groups.values(), []), replacement_a, replacement_b],
+        forbidden_rows=[],
+        replacements=specs,
+        seed=42,
+        namespace="test-replacements",
+    )
+
+    assert first == second
+    replaced, provenance, audit = first
+    assert {row.record_id for row in replaced["gold_squad_validation_04"]} == {
+        "replacement-a",
+        "replacement-b",
+    }
+    assert [row["reason"] for row in provenance] == [
+        "duplicate_prompt_hash",
+        "duplicate_prompt_hash",
+    ]
+    assert audit["before_unique_prompt_count"] == 4
+    assert audit["after_unique_prompt_count"] == 6
+
+
+def test_prompt_unique_replacements_fail_closed_on_wrong_duplicate_identity() -> None:
+    records = _unique_records("validation", 3, split="validation")
+    groups = {
+        "gold_squad_validation_00": [records[0]],
+        "gold_squad_validation_01": [records[1]],
+    }
+    try:
+        replace_duplicate_iid_prompts(
+            groups,
+            validation_rows=records,
+            forbidden_rows=[],
+            replacements=[
+                {
+                    "group": "gold_squad_validation_01",
+                    "source_id": records[1].record_id,
+                    "retained_group": "gold_squad_validation_00",
+                    "retained_source_id": records[0].record_id,
+                }
+            ],
+            seed=42,
+            namespace="test-replacements",
+        )
+    except ValueError as error:
+        assert "declared duplicate" in str(error)
+    else:
+        raise AssertionError("A replacement must reference a real duplicate prompt.")
+
+
+def test_prompt_replacement_masks_inherit_removed_candidate_membership() -> None:
+    source = [
+        {
+            "candidate_id": "retained",
+            "private_group": "gold_squad_validation_01",
+            "source_id": "retained-source",
+        },
+        {
+            "candidate_id": "removed",
+            "private_group": "gold_squad_validation_04",
+            "source_id": "removed-source",
+        },
+    ]
+    destination = [
+        dict(source[0]),
+        {
+            "candidate_id": "replacement",
+            "private_group": "gold_squad_validation_04",
+            "source_id": "replacement-source",
+        },
+    ]
+    masks = {"retained": [1, 0, 1], "removed": [0, 1, 0]}
+    replacements = [
+        {
+            "group": "gold_squad_validation_04",
+            "replacement_source_id": "replacement-source",
+            "removed_candidate_id": "removed",
+        }
+    ]
+
+    inherited = _inherit_iid_prompt_replacement_masks(
+        destination, source, masks, replacements
+    )
+
+    assert inherited == {
+        "retained": [1, 0, 1],
+        "replacement": [0, 1, 0],
+    }
 
 
 def test_iid_validation_groups_reject_nonunique_baseline() -> None:
@@ -223,3 +365,40 @@ def test_iid_config_and_runners_preserve_scientific_settings() -> None:
     assert "--parsable" in submitter
     assert 'if [[ -n "${EXCLUDE_NODES:-}" ]]' in submitter
     assert 'exclude_args+=(--exclude="$EXCLUDE_NODES")' in submitter
+
+
+def test_prompt_unique_control_config_and_runners() -> None:
+    config = OmegaConf.load("conf/squad_lora_rmia_iid_prompt_unique_control.yaml")
+    replacements = config.candidate_suite.prompt_replacements
+    assert (
+        config.paths.output_root == "outputs/squad_lora_rmia_iid_prompt_unique_control"
+    )
+    assert replacements.enabled is True
+    assert replacements.source_output_root == (
+        "outputs/squad_lora_rmia_iid_ablation/formal"
+    )
+    assert replacements.expected_unique_prompts_before == 5118
+    assert replacements.expected_unique_prompts_after == 5120
+    assert list(replacements.expected_included_by_shadow) == [
+        3001,
+        3088,
+        3064,
+        3051,
+        3071,
+    ]
+    assert [item.source_id for item in replacements.records] == [
+        "5726e65e708984140094d53e",
+        "56d98fbfdc89441400fdb563",
+    ]
+
+    runner = Path(
+        "scripts/run_squad_lora_rmia_iid_prompt_unique_control_formal.sh"
+    ).read_text(encoding="utf-8")
+    assert "squad_lora_rmia_iid_prompt_unique_control" in runner
+    assert "attack_control" in runner
+    submitter = Path(
+        "scripts/submit_squad_lora_rmia_iid_prompt_unique_control.sh"
+    ).read_text(encoding="utf-8")
+    assert 'partition="xe8545"' in submitter
+    assert 'partition="tmp"' in submitter
+    assert "run_squad_lora_rmia_iid_prompt_unique_control_formal.sh" in submitter
