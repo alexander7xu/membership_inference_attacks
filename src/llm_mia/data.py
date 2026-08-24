@@ -501,7 +501,9 @@ def canonicalize_candidate_rows(
             {
                 **private,
                 "candidate_id": canonical_id,
-                "source_candidate_id": source_candidate_id,
+                "source_candidate_id": str(
+                    private.get("source_candidate_id", source_candidate_id)
+                ),
                 "raw_row_index": raw_index,
             }
         )

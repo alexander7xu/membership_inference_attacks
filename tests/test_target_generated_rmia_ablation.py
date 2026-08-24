@@ -4,7 +4,11 @@ import pytest
 from omegaconf import OmegaConf
 
 from src.llm_mia.analysis import paired_bootstrap_binary_metric_differences
-from src.llm_mia.data import read_shadow_masks, write_explicit_shadow_masks
+from src.llm_mia.data import (
+    canonicalize_candidate_rows,
+    read_shadow_masks,
+    write_explicit_shadow_masks,
+)
 from src.llm_mia.plotting import (
     TARGET_GENERATED_GROUP_COLORS,
     plot_group_feature_ecdf,
@@ -74,6 +78,35 @@ def test_target_generated_masks_inherit_by_member_id_and_source_identity() -> No
         "generated-00": masks["gold-00"],
         "generated-01": masks["gold-01"],
     }
+
+
+def test_target_generated_canonicalization_preserves_gold_lineage() -> None:
+    source, masks = _source_rows()
+    public = [
+        {
+            "candidate_id": "generated-00",
+            "prompt": "Question: generated?\nAnswer:",
+            "completion": " generated",
+            "content_sha256": "generated-content",
+        }
+    ]
+    private = [
+        {
+            "candidate_id": "generated-00",
+            "private_group": "target_gen_squad_validation_00",
+            "source_id": "validation-00",
+            "source_candidate_id": "gold-00",
+            "record_membership_label": 0,
+        }
+    ]
+
+    _, mapping = canonicalize_candidate_rows(
+        public, private, preserve_source_candidate_ids=True
+    )
+    inherited = _inherit_target_generated_masks(mapping, source, masks, group_count=2)
+
+    assert mapping[0]["source_candidate_id"] == "gold-00"
+    assert inherited == {"generated-00": masks["gold-00"]}
 
 
 @pytest.mark.parametrize(
