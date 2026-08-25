@@ -59,7 +59,20 @@ def test_common_limits_cover_all_settings_with_margin() -> None:
     assert upper > max(all_values)
 
 
-def test_matrix_plot_has_nine_equal_cells(tmp_path: Path) -> None:
+def test_matrix_plot_has_one_axis_and_nine_ecdfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from matplotlib.figure import Figure
+
+    saved: dict[str, object] = {}
+    original_savefig = Figure.savefig
+
+    def record_figure(figure: Figure, *args, **kwargs) -> None:
+        saved["axis_count"] = len(figure.axes)
+        saved["line_labels"] = [line.get_label() for line in figure.axes[0].lines]
+        original_savefig(figure, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", record_figure)
     output = tmp_path / "matrix.png"
 
     plot_feature_matrix_ecdf(
@@ -72,6 +85,9 @@ def test_matrix_plot_has_nine_equal_cells(tmp_path: Path) -> None:
     )
 
     assert output.stat().st_size > 10_000
+    assert saved["axis_count"] == 1
+    labels = [label for label in saved["line_labels"] if not label.startswith("_")]
+    assert len(labels) == 9
 
 
 def test_matrix_plot_rejects_missing_cell(tmp_path: Path) -> None:

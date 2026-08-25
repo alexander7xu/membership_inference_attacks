@@ -19,6 +19,11 @@ from src.llm_mia.plotting import (
 FEATURE_NAME = "population_centered_relative_log_likelihood"
 SOURCE_ORDER = ("squad_train", "squad_validation", "trivia_validation")
 VARIANT_ORDER = ("gold", "base_generated", "lora_generated")
+VARIANT_LINESTYLES = {
+    "gold": "-",
+    "base_generated": "--",
+    "lora_generated": "-.",
+}
 
 
 def population_center(values: Sequence[float]) -> tuple[float, list[float]]:
@@ -86,21 +91,13 @@ def plot_feature_matrix_ecdf(
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
-    figure, axes = plt.subplots(
-        3,
-        3,
-        figsize=(13.2, 10.2),
-        sharex=True,
-        sharey=True,
-        constrained_layout=True,
-    )
+    figure, axis = plt.subplots(figsize=(10.5, 7.0), constrained_layout=True)
     group_for_cell = {
         (GROUP_SOURCE[group], GROUP_VARIANT[group]): group for group in CANDIDATE_GROUPS
     }
     sample_size = next(iter(counts))
-    for row_index, source in enumerate(SOURCE_ORDER):
-        for column_index, variant in enumerate(VARIANT_ORDER):
-            axis = axes[row_index][column_index]
+    for source in SOURCE_ORDER:
+        for variant in VARIANT_ORDER:
             group = group_for_cell[(source, variant)]
             values = sorted(rows_by_group[group])
             cumulative = [(index + 1) / len(values) for index in range(len(values))]
@@ -110,32 +107,29 @@ def plot_feature_matrix_ecdf(
                 where="post",
                 linewidth=2.0,
                 color=SOURCE_COLORS[source],
+                linestyle=VARIANT_LINESTYLES[variant],
+                label=f"{SOURCE_LABELS[source]} / {VARIANT_LABELS[variant]}",
             )
-            axis.axvline(0.0, color="#555555", linewidth=1.0, linestyle=(0, (1, 2)))
-            axis.set_xlim(*x_limits)
-            axis.set_ylim(0.0, 1.0)
-            axis.grid(color="#D7D7D7", linewidth=0.7, alpha=0.7)
-            axis.spines["top"].set_visible(False)
-            axis.spines["right"].set_visible(False)
-            if row_index == 0:
-                axis.set_title(VARIANT_LABELS[variant], pad=8)
-            if column_index == 0:
-                axis.annotate(
-                    SOURCE_LABELS[source],
-                    xy=(-0.22, 0.5),
-                    xycoords="axes fraction",
-                    rotation=90,
-                    ha="center",
-                    va="center",
-                    fontsize=11,
-                    fontweight="bold",
-                )
-    figure.suptitle(
+    axis.axvline(0.0, color="#555555", linewidth=1.0, linestyle=(0, (1, 2)))
+    axis.set_xlim(*x_limits)
+    axis.set_ylim(0.0, 1.0)
+    axis.grid(color="#D7D7D7", linewidth=0.7, alpha=0.7)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.set_title(
         f"{model_display_name}: {setting_label}\n"
-        f"Population-centered target-versus-five-shadow feature, n={sample_size} per cell",
+        f"Population-centered target-versus-five-shadow feature, n={sample_size} per group",
         fontsize=15,
+        pad=12,
     )
-    figure.supxlabel("Population-centered relative mean log-likelihood")
-    figure.supylabel("Empirical cumulative probability")
+    axis.set_xlabel("Population-centered relative mean log-likelihood")
+    axis.set_ylabel("Empirical cumulative probability")
+    axis.legend(
+        loc="upper left",
+        ncols=3,
+        frameon=False,
+        fontsize=9,
+        handlelength=3.0,
+    )
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(figure)
