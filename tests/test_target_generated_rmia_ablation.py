@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 import pytest
@@ -195,6 +196,20 @@ def test_control_shadow_is_validated_with_its_recorded_config(tmp_path: Path) ->
     assert _training_run_is_complete_for_recorded_config(
         treatment_cfg, run_dir, strategy
     )
+
+
+def test_artifact_validation_calls_specify_expected_row_counts() -> None:
+    tree = ast.parse(Path("src/llm_mia/workflow.py").read_text(encoding="utf-8"))
+    missing = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_artifact_record_is_complete"
+        and not any(keyword.arg == "expected_row_counts" for keyword in node.keywords)
+    ]
+
+    assert missing == []
 
 
 def test_paired_bootstrap_uses_shared_pairs_and_reports_direction() -> None:

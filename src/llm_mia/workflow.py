@@ -3917,6 +3917,7 @@ def run_gold_iid_comparison(
                 cfg,
                 manifest_path,
                 {"comparison": comparison_path},
+                expected_row_counts={},
             )
         ):
             LOGGER.info("Reusing paired gold-IID comparison: %s", comparison_path)
@@ -4802,6 +4803,7 @@ def _validate_target_generated_ablation_outputs(
         cfg,
         comparison_manifest_path,
         {"comparison": comparison_path},
+        expected_row_counts={},
     ):
         raise ValueError("Paired gold-IID comparison artifacts failed validation.")
     comparison_manifest = read_json(comparison_manifest_path)
