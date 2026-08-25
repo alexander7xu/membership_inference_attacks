@@ -90,6 +90,7 @@ def plot_feature_matrix_ecdf(
 
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     figure, axis = plt.subplots(figsize=(10.5, 7.0), constrained_layout=True)
     group_for_cell = {
@@ -124,9 +125,41 @@ def plot_feature_matrix_ecdf(
     )
     axis.set_xlabel("Population-centered relative mean log-likelihood")
     axis.set_ylabel("Empirical cumulative probability")
-    axis.legend(
+    source_handles = [
+        Line2D(
+            [0],
+            [0],
+            color=SOURCE_COLORS[source],
+            linewidth=2.0,
+            label=SOURCE_LABELS[source],
+        )
+        for source in SOURCE_ORDER
+    ]
+    variant_handles = [
+        Line2D(
+            [0],
+            [0],
+            color="#333333",
+            linewidth=2.0,
+            linestyle=VARIANT_LINESTYLES[variant],
+            label=VARIANT_LABELS[variant],
+        )
+        for variant in VARIANT_ORDER
+    ]
+    source_legend = axis.legend(
+        handles=source_handles,
+        title="Data source",
         loc="upper left",
-        ncols=3,
+        frameon=False,
+        fontsize=9,
+        handlelength=3.0,
+    )
+    axis.add_artist(source_legend)
+    axis.legend(
+        handles=variant_handles,
+        title="Text origin",
+        loc="upper left",
+        bbox_to_anchor=(0.25, 1.0),
         frameon=False,
         fontsize=9,
         handlelength=3.0,
