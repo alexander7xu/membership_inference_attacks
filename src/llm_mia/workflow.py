@@ -169,6 +169,14 @@ def run_stage(cfg: DictConfig, *, command: str) -> None:
             plot_lira_feature_distribution(
                 cfg, project_root=project_root, command=command
             )
+        elif stage == "plot_feature_matrix":
+            from src.llm_mia.feature_matrix_workflow import (
+                plot_population_centered_feature_matrix,
+            )
+
+            plot_population_centered_feature_matrix(
+                cfg, project_root=project_root, command=command
+            )
         else:
             raise ValueError(f"Unknown workflow.stage: {stage}")
     finally:

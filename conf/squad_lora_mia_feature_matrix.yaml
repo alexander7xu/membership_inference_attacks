@@ -1,0 +1,88 @@
+defaults:
+  - llm_model: pythia_410m
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.output_root}/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+runtime:
+  seed: 42
+  deterministic: false
+
+experiment:
+  purpose: "Compare population-centered MIA features across source, text origin, and checkpoint setting."
+  hypothesis: "Source and text origin produce persistent feature shifts after population centering, while the shadow training distribution changes their magnitude."
+
+workflow:
+  stage: plot_feature_matrix
+  profile: formal
+  force: false
+
+paths:
+  output_root: outputs/squad_lora_mia_feature_matrix
+  data_dir: data/squad_lora_rmia
+
+data:
+  squad_validation_population_size: 1024
+
+tokenizer:
+  max_length: 1024
+  preprocessing_workers: 8
+  trust_remote_code: false
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: all-linear
+
+precision:
+  bf16: true
+
+attack:
+  batch_size: 96
+  loss_chunk_tokens: 64
+
+analysis:
+  feature: population_centered_relative_log_likelihood
+  candidate_source_output_root: outputs/squad_lora_rmia/formal
+  sample_size_per_group: 512
+  sampling_seed: ${runtime.seed}
+  reference_shadow_count: 5
+  figure_dpi: 240
+  population_sha256: 7831c39a09824ea3f8dcde42f23e3ba6171f30ead85994d67b096cea874a3f21
+  settings:
+    one_epoch_rmia:
+      label: 1-Epoch RMIA
+      source_output_root: outputs/squad_lora_lira/formal
+      expected_epochs: 1
+    one_epoch_lira:
+      label: 1-Epoch LiRA
+      source_output_root: outputs/squad_lora_lira/formal
+      expected_epochs: 1
+    ten_epoch_rmia:
+      label: 10-Epoch RMIA
+      source_output_root: outputs/squad_lora_rmia_more_epochs/formal
+      expected_epochs: 10
+    one_epoch_rmia_gold_iid:
+      label: 1-Epoch RMIA (Gold-IID)
+      source_output_root: outputs/squad_lora_rmia_iid_ablation/formal
+      expected_epochs: 1
+    one_epoch_rmia_target_generated:
+      label: 1-Epoch RMIA (Target-generated)
+      source_output_root: outputs/squad_lora_rmia_target_generated_prompt_unique_ablation/formal
+      expected_epochs: 1
+
+wandb:
+  enabled: true
+  mode: offline
+  project: membership-inference-attacks
+  entity: null
+  tags: ["squad", "lora", "mia-feature-matrix", "population-centered"]
+
+report:
+  resolved_config_filename: resolved_config.yaml
+  experiment_filename: experiment.md
