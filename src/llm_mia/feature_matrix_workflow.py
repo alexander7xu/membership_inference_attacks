@@ -15,6 +15,7 @@ from src.llm_mia.data import (
     file_sha256,
     read_json,
     read_jsonl,
+    record_from_json,
     record_from_public_candidate,
     write_json,
     write_jsonl,
@@ -239,6 +240,22 @@ def _analysis_candidate_rows(
     return public_rows, private_rows
 
 
+def _load_verified_population(
+    path: Path, *, expected_sha256: str, expected_rows: int
+) -> list[QARecord]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Feature matrix population is missing: {path}")
+    if file_sha256(path) != expected_sha256:
+        raise ValueError("Feature matrix population SHA256 differs.")
+    population = [record_from_json(row) for row in read_jsonl(path)]
+    if len(population) != expected_rows:
+        raise ValueError(
+            f"Feature matrix population has {len(population)} rows; "
+            f"expected {expected_rows}."
+        )
+    return population
+
+
 def _score_checkpoint(
     cfg: DictConfig,
     *,
@@ -395,7 +412,6 @@ def plot_population_centered_feature_matrix(
         _log_wandb_stage,
         data_root,
         extended_environment,
-        load_split_file,
         model_root,
     )
 
@@ -426,11 +442,11 @@ def plot_population_centered_feature_matrix(
 
     population_path = data_root(cfg, project_root) / "squad_validation_population.jsonl"
     population_sha256 = str(cfg.analysis.population_sha256)
-    if file_sha256(population_path) != population_sha256:
-        raise ValueError("Feature matrix population SHA256 differs.")
-    population = load_split_file(cfg, project_root, "squad_validation_population")
-    if len(population) != int(cfg.data.squad_validation_population_size):
-        raise ValueError("Feature matrix population row count differs.")
+    population = _load_verified_population(
+        population_path,
+        expected_sha256=population_sha256,
+        expected_rows=int(cfg.data.squad_validation_population_size),
+    )
     all_records = [*sampled_candidates, *population]
     score_input_sha256 = feature_cache_key(
         {

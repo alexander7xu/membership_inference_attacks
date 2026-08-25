@@ -3,8 +3,15 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from src.llm_mia.data import file_sha256, write_json
+from src.llm_mia.data import (
+    QARecord,
+    file_sha256,
+    record_to_json,
+    write_json,
+    write_jsonl,
+)
 from src.llm_mia.feature_matrix_workflow import (
+    _load_verified_population,
     _tree_file_sha256,
     _validate_candidate_source,
     _validate_checkpoint_root,
@@ -137,3 +144,42 @@ def test_candidate_source_rejects_manifest_hash_mismatch(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="Source manifest hash mismatch"):
         _validate_candidate_source(root)
+
+
+def test_verified_population_loads_without_training_data_config(tmp_path: Path) -> None:
+    path = tmp_path / "population.jsonl"
+    record = QARecord(
+        record_id="population-0",
+        dataset="squad",
+        split="validation",
+        prompt="Question\n",
+        completion=" answer",
+        answers=("answer",),
+    )
+    write_jsonl(path, [record_to_json(record)])
+
+    loaded = _load_verified_population(
+        path, expected_sha256=file_sha256(path), expected_rows=1
+    )
+
+    assert loaded == [record]
+
+
+def test_verified_population_rejects_hash_or_row_mismatch(tmp_path: Path) -> None:
+    path = tmp_path / "population.jsonl"
+    record = QARecord(
+        record_id="population-0",
+        dataset="squad",
+        split="validation",
+        prompt="Question\n",
+        completion=" answer",
+        answers=("answer",),
+    )
+    write_jsonl(path, [record_to_json(record)])
+
+    with pytest.raises(ValueError, match="SHA256 differs"):
+        _load_verified_population(path, expected_sha256="0" * 64, expected_rows=1)
+    with pytest.raises(ValueError, match="expected 2"):
+        _load_verified_population(
+            path, expected_sha256=file_sha256(path), expected_rows=2
+        )
