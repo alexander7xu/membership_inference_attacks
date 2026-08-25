@@ -19,7 +19,7 @@ case "$model" in
     ;;
 esac
 
-ATTACK_BATCH_SIZE="${ATTACK_BATCH_SIZE:-96}"
+ATTACK_BATCH_SIZE="${ATTACK_BATCH_SIZE:-32}"
 printf '[%s] model=%s stage=plot_feature_matrix start\n' \
   "$(date --iso-8601=seconds)" "$model"
 uv run python ./cli/squad_lora_rmia.py \

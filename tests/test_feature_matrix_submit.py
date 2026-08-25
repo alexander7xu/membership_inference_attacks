@@ -26,6 +26,8 @@ def test_runner_uses_only_analysis_stage_and_propagates_exit_code() -> None:
 
     assert "set -euo pipefail" in script
     assert "workflow.stage=plot_feature_matrix" in script
+    assert 'ATTACK_BATCH_SIZE="${ATTACK_BATCH_SIZE:-32}"' in script
+    assert 'attack.batch_size="$ATTACK_BATCH_SIZE"' in script
     assert "train_shadows" not in script
     assert "attack_control" not in script
     assert "plot_rmia_feature" not in script
