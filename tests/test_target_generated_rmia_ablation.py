@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from src.llm_mia.analysis import paired_bootstrap_binary_metric_differences
 from src.llm_mia.data import (
@@ -9,12 +9,15 @@ from src.llm_mia.data import (
     read_shadow_masks,
     write_explicit_shadow_masks,
 )
+from src.llm_mia.finetuning import LoraFineTuningStrategy
 from src.llm_mia.plotting import (
     TARGET_GENERATED_GROUP_COLORS,
     plot_group_feature_ecdf,
 )
 from src.llm_mia.workflow import (
     _inherit_target_generated_masks,
+    _training_run_is_complete,
+    _training_run_is_complete_for_recorded_config,
     _validate_unique_generation_source_prompts,
     attack_metrics,
 )
@@ -155,6 +158,43 @@ def test_explicit_shadow_masks_round_trip_and_reject_invalid_rows(
 
     with pytest.raises(ValueError):
         write_explicit_shadow_masks(output, {"bad": [1, 1, 1]})
+
+
+def test_control_shadow_is_validated_with_its_recorded_config(tmp_path: Path) -> None:
+    treatment_cfg = OmegaConf.create(
+        {
+            "experiment": "target-generated",
+            "workflow": {"stage": "validate", "force": False},
+            "report": {
+                "resolved_config_filename": "resolved_config.yaml",
+                "experiment_filename": "experiment.md",
+            },
+        }
+    )
+    control_cfg = OmegaConf.create(
+        {
+            "experiment": "gold-iid-control",
+            "workflow": {"stage": "validate", "force": False},
+            "report": {
+                "resolved_config_filename": "resolved_config.yaml",
+                "experiment_filename": "experiment.md",
+            },
+        }
+    )
+    assert isinstance(treatment_cfg, DictConfig)
+    run_dir = tmp_path / "shadow_00"
+    (run_dir / "adapter").mkdir(parents=True)
+    (run_dir / "train_manifest.jsonl").write_text("{}\n", encoding="utf-8")
+    (run_dir / "metrics.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "experiment.md").write_text("complete\n", encoding="utf-8")
+    (run_dir / "adapter" / "adapter_config.json").write_text("{}\n", encoding="utf-8")
+    OmegaConf.save(control_cfg, run_dir / "resolved_config.yaml")
+    strategy = LoraFineTuningStrategy()
+
+    assert not _training_run_is_complete(treatment_cfg, run_dir, strategy)
+    assert _training_run_is_complete_for_recorded_config(
+        treatment_cfg, run_dir, strategy
+    )
 
 
 def test_paired_bootstrap_uses_shared_pairs_and_reports_direction() -> None:

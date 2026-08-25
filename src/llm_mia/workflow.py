@@ -869,6 +869,23 @@ def _training_run_is_complete(
     return strategy.checkpoint_is_complete(checkpoint_path, config_sha256=config_sha256)
 
 
+def _training_run_is_complete_for_recorded_config(
+    cfg: DictConfig,
+    run_dir: Path,
+    strategy: FineTuningStrategy,
+) -> bool:
+    resolved_config_path = run_dir / str(cfg.report.resolved_config_filename)
+    if not resolved_config_path.is_file():
+        return False
+    try:
+        recorded_cfg = OmegaConf.load(resolved_config_path)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(recorded_cfg, DictConfig):
+        return False
+    return _training_run_is_complete(recorded_cfg, run_dir, strategy)
+
+
 def _resume_checkpoint(
     cfg: DictConfig,
     *,
@@ -4663,7 +4680,9 @@ def _validate_target_generated_ablation_outputs(
         if (
             not _training_run_is_complete(cfg, run_dir, strategy)
             or not _run_config_matches(cfg, run_dir)
-            or not _training_run_is_complete(cfg, source_run, strategy)
+            or not _training_run_is_complete_for_recorded_config(
+                cfg, source_run, strategy
+            )
         ):
             raise ValueError(f"Shadow training record is incomplete: {run_dir}")
         included_ids = {
