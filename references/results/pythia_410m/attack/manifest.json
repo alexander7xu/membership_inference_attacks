@@ -1,0 +1,31 @@
+{
+  "config_sha256": "f893a0509a57865d79abb171131576bd4116f1d0a8496c36238bad0c2a006fd7",
+  "execution_source_state": {
+    "branch": "master",
+    "commit": "6447cce3dcf07d2797e9a41355b966732611d4f0",
+    "short_commit": "6447cce",
+    "status": "M .gitignore\n M README.md\n M pyproject.toml\n M src/attacker/lira.py\n M src/attacker/rmia.py\n M src/dataset/torchvision_dataset.py\n M src/experiment/records.py\n M src/model/torchvision_model.py\n M src/utils/config_class.py\n M uv.lock\n?? cli/debug_squad_lora_gpu.py\n?? cli/squad_lora_rmia.py\n?? conf/llm_model/\n?? conf/squad_lora_rmia.yaml\n?? references/\n?? scripts/\n?? src/llm_mia/\n?? tests/test_llm_mia_analysis.py\n?? tests/test_llm_mia_data.py\n?? tests/test_llm_mia_scoring.py\n?? tests/test_llm_mia_tokenization.py\n?? tests/test_llm_mia_tracking.py"
+  },
+  "file_sha256": {
+    "metrics": "54b37e21d12de790c623e2aea113d11690dd7670987305d9e52f5fc8140972b7",
+    "scores": "5fa5e53b680218fe57b5790d7ad2204e66ef54460dec94aaba8100561a939b0a"
+  },
+  "files": {
+    "metrics": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/pythia_410m/attack/metrics.json",
+    "scores": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/pythia_410m/attack/online_rmia_scores.jsonl"
+  },
+  "model": "EleutherAI/pythia-410m",
+  "row_counts": {
+    "candidates": 5248,
+    "population": 1024,
+    "shadow_models": 5
+  },
+  "seed": 42,
+  "source_snapshot": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "6833dafb1a5814919a9a44fb47673fdb5b0aa57e",
+    "note": "Retrospective commit of the recorded execution worktree.",
+    "plan_commit": "b31db23342202ab001f9fe53bbbb16c0440dcf69"
+  },
+  "tokenizer": "EleutherAI/pythia-410m"
+}

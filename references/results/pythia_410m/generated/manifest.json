@@ -1,0 +1,32 @@
+{
+  "config_sha256": "f893a0509a57865d79abb171131576bd4116f1d0a8496c36238bad0c2a006fd7",
+  "execution_source_state": {
+    "branch": "master",
+    "commit": "6447cce3dcf07d2797e9a41355b966732611d4f0",
+    "short_commit": "6447cce",
+    "status": "M .gitignore\n M README.md\n M pyproject.toml\n M src/attacker/lira.py\n M src/attacker/rmia.py\n M src/dataset/torchvision_dataset.py\n M src/experiment/records.py\n M src/model/torchvision_model.py\n M src/utils/config_class.py\n M uv.lock\n?? cli/debug_squad_lora_gpu.py\n?? cli/squad_lora_rmia.py\n?? conf/llm_model/\n?? conf/squad_lora_rmia.yaml\n?? references/\n?? scripts/\n?? src/llm_mia/\n?? tests/test_llm_mia_analysis.py\n?? tests/test_llm_mia_data.py\n?? tests/test_llm_mia_scoring.py\n?? tests/test_llm_mia_tokenization.py\n?? tests/test_llm_mia_tracking.py"
+  },
+  "file_sha256": {
+    "metrics": "b1b2a61da178fdcf97368f8115e1d87a23a0b81a52dee36659dddf2f8470cc24",
+    "private_generated_labels": "8896fc13d597417fe64913cb2891ca8e5cb3a22eff10e7b34dc73cbc089f5445",
+    "public_generated": "47e0cb3f4a4e92fc07fae0139d21329c117e6f985177881b6a184f8f94427bdb"
+  },
+  "files": {
+    "metrics": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/pythia_410m/generated/metrics.json",
+    "private_generated_labels": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/pythia_410m/generated/private_generated_labels.jsonl",
+    "public_generated": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/pythia_410m/generated/public_generated.jsonl"
+  },
+  "model": "EleutherAI/pythia-410m",
+  "row_counts": {
+    "private_generated_labels": 3072,
+    "public_generated": 3072
+  },
+  "seed": 42,
+  "source_snapshot": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "6833dafb1a5814919a9a44fb47673fdb5b0aa57e",
+    "note": "Retrospective commit of the recorded execution worktree.",
+    "plan_commit": "b31db23342202ab001f9fe53bbbb16c0440dcf69"
+  },
+  "tokenizer": "EleutherAI/pythia-410m"
+}

@@ -1,0 +1,5 @@
+# @package model
+key: pythia_410m
+name_or_path: EleutherAI/pythia-410m
+revision: 9879c9b5f8bea9051dcb0e68dff21493d67e9d4f
+display_name: Pythia-410M

@@ -10,4 +10,5 @@ __pycache__
 /outputs
 /wandb
 /multirun
+/hf_cache
 *.egg-info

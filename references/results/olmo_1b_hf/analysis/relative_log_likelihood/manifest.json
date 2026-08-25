@@ -1,0 +1,198 @@
+{
+  "artifact_sha256": {
+    "figure": "c56f41acbc3cc1a3cdb6fbd6c4548cc2cf0b40f2e63420d6cb8561f06ab995e3",
+    "resolved_config": "9d9f59277db912171274ea487268f56138d37c1baa3d7d0de1e0291ef5a7db95",
+    "sampled_candidates": "ddd665ed7f854e618412e029737a27453ee9102874a23f279fc7d232505f39a5"
+  },
+  "artifacts": {
+    "figure": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/analysis/relative_log_likelihood/relative_log_likelihood_ecdf.png",
+    "resolved_config": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/analysis/relative_log_likelihood/resolved_config.yaml",
+    "sampled_candidates": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/analysis/relative_log_likelihood/sampled_candidates.jsonl"
+  },
+  "config_sha256": "9d9f59277db912171274ea487268f56138d37c1baa3d7d0de1e0291ef5a7db95",
+  "feature": "relative_log_likelihood",
+  "feature_definition": "target_mean_logprob - logmeanexp(mean_logprob from every saved shadow adapter)",
+  "group_order": [
+    "gold_squad_target_train",
+    "base_gen_from_squad_train",
+    "lora_gen_from_squad_train",
+    "gold_squad_validation",
+    "base_gen_from_squad_validation",
+    "lora_gen_from_squad_validation",
+    "gold_trivia_validation",
+    "base_gen_from_trivia_validation",
+    "lora_gen_from_trivia_validation"
+  ],
+  "group_summaries": {
+    "base_gen_from_squad_train": {
+      "count": 512.0,
+      "max": -0.1721722998643085,
+      "mean": -0.4268366101620213,
+      "median": -0.42981322171299907,
+      "min": -0.8425541235374764,
+      "p05": -0.6238657163417194,
+      "p25": -0.5044009251344752,
+      "p75": -0.3394272736242468,
+      "p95": -0.24539219306094595,
+      "std": 0.1173788598861251
+    },
+    "base_gen_from_squad_validation": {
+      "count": 512.0,
+      "max": -0.15472204678563473,
+      "mean": -0.43768873111864287,
+      "median": -0.43692444136935216,
+      "min": -0.829379351028741,
+      "p05": -0.6678991774745517,
+      "p25": -0.5280080419522735,
+      "p75": -0.3340765325622164,
+      "p95": -0.23877572491474106,
+      "std": 0.13206981827336337
+    },
+    "base_gen_from_trivia_validation": {
+      "count": 512.0,
+      "max": -0.2234272923021947,
+      "mean": -4.399133102453969,
+      "median": -4.847548463657813,
+      "min": -9.371755275578202,
+      "p05": -7.709734998316755,
+      "p25": -6.082345414630108,
+      "p75": -2.979665031547211,
+      "p95": -0.43921489074458275,
+      "std": 2.3118285143488633
+    },
+    "gold_squad_target_train": {
+      "count": 512.0,
+      "max": 1.0206584217707129,
+      "mean": 0.02026083185222266,
+      "median": 0.0018184036282844589,
+      "min": -1.2490222357496168,
+      "p05": -0.043404569847006316,
+      "p25": -0.001166877083044702,
+      "p75": 0.013789263186105823,
+      "p95": 0.15429050036441488,
+      "std": 0.11367852087549019
+    },
+    "gold_squad_validation": {
+      "count": 512.0,
+      "max": 0.49326893756062784,
+      "mean": -0.017699911917304592,
+      "median": 9.967394420890271e-05,
+      "min": -1.1360507904338382,
+      "p05": -0.16701128869788878,
+      "p25": -0.010270473062123241,
+      "p75": 0.007016265965211231,
+      "p95": 0.07005306651674827,
+      "std": 0.1146904189172348
+    },
+    "gold_trivia_validation": {
+      "count": 512.0,
+      "max": 0.8275601612528031,
+      "mean": -0.5850269656678179,
+      "median": -0.051527138134632555,
+      "min": -6.438023655673436,
+      "p05": -2.6333911818396967,
+      "p25": -0.9554543084907542,
+      "p75": 0.0030092804690611593,
+      "p95": 0.09586129375566504,
+      "std": 0.9841685372872623
+    },
+    "lora_gen_from_squad_train": {
+      "count": 512.0,
+      "max": -0.6051488905390715,
+      "mean": -1.1510471344774071,
+      "median": -1.0521243047543136,
+      "min": -2.1138355903893715,
+      "p05": -1.7304583367185238,
+      "p25": -1.2851737223372661,
+      "p75": -0.9349290724933275,
+      "p95": -0.8572492897510275,
+      "std": 0.288644245396404
+    },
+    "lora_gen_from_squad_validation": {
+      "count": 512.0,
+      "max": -0.7743698001602697,
+      "mean": -1.1762055551686201,
+      "median": -1.0687510390067425,
+      "min": -2.0798092305170806,
+      "p05": -1.7291828547035633,
+      "p25": -1.4071063540586848,
+      "p75": -0.9462763194408345,
+      "p95": -0.8713446909479136,
+      "std": 0.2933294465670978
+    },
+    "lora_gen_from_trivia_validation": {
+      "count": 512.0,
+      "max": -0.5544678036031088,
+      "mean": -4.556531882531814,
+      "median": -4.903285473091572,
+      "min": -9.309326738795159,
+      "p05": -7.797734941482944,
+      "p25": -6.190660988600513,
+      "p75": -2.9677996102286266,
+      "p95": -1.0242701048674911,
+      "std": 2.1353145848483535
+    }
+  },
+  "implementation_files": {
+    "plotting": {
+      "path": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/src/llm_mia/plotting.py",
+      "sha256": "71eca1d1945b4a0f84bc4c58bf7e4f5844bfa56e4cb5d3153432a414ab8c6105"
+    },
+    "workflow": {
+      "path": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/src/llm_mia/workflow.py",
+      "sha256": "d980e6f3e369dd9537af722004865439c4d14d389d1597a2409f13d7dcd92044"
+    }
+  },
+  "model": "allenai/OLMo-1B-hf",
+  "reference_shadow_count": 5,
+  "row_counts": {
+    "base_gen_from_squad_train": 512,
+    "base_gen_from_squad_validation": 512,
+    "base_gen_from_trivia_validation": 512,
+    "gold_squad_target_train": 512,
+    "gold_squad_validation": 512,
+    "gold_trivia_validation": 512,
+    "lora_gen_from_squad_train": 512,
+    "lora_gen_from_squad_validation": 512,
+    "lora_gen_from_trivia_validation": 512,
+    "total": 4608
+  },
+  "sample_size_per_group": 512,
+  "sampling_algorithm": "ascending_sha256(seed:rmia-feature:group:candidate_id)",
+  "sampling_before_model_scoring": true,
+  "sampling_seed": 42,
+  "sampling_without_replacement": true,
+  "seed": 42,
+  "shadow_adapters": [
+    "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/shadows/shadow_00/adapter",
+    "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/shadows/shadow_01/adapter",
+    "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/shadows/shadow_02/adapter",
+    "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/shadows/shadow_03/adapter",
+    "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/shadows/shadow_04/adapter"
+  ],
+  "source_files": {
+    "base_private": {
+      "path": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/generated/base/private_generated_labels.jsonl",
+      "sha256": "8f7f4765f0b83d200db6ce6e4c14b613b9f4da9aa4a399983e5b9c3daca0d6f0"
+    },
+    "base_public": {
+      "path": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/generated/base/public_generated.jsonl",
+      "sha256": "10af29e098214d1751e5677a8ba4926be91d366b8b96cc3373659670af1323e6"
+    },
+    "lora_and_gold_private": {
+      "path": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/candidates/private_labels.jsonl",
+      "sha256": "f6a0bb730436b227c6a1d1352357443301b95b3c203711b2830e8d0b3a1fdc7d"
+    },
+    "lora_and_gold_public": {
+      "path": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/candidates/public_candidates.jsonl",
+      "sha256": "3becc1753808dd06c03c8290df77164632f4191496dfed71dac3f06707291b21"
+    }
+  },
+  "source_state": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "601a0fd5a98b0497bb718e8ff866cc7270f2fd25",
+    "short_commit": "601a0fd",
+    "status": "M conf/squad_lora_rmia.yaml\n M src/llm_mia/workflow.py\n?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh\n?? src/llm_mia/plotting.py\n?? tests/test_llm_mia_plotting.py"
+  },
+  "target_adapter": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/olmo_1b_hf/target/seed_42/adapter"
+}

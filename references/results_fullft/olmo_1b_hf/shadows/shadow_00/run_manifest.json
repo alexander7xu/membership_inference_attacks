@@ -1,0 +1,14 @@
+{
+  "config_sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+  "file_sha256": {
+    "experiment.md": "05dc3c1c1761f78b63511ecff44ad6d7cb55dcbf62046a7e77058d838edcf3d8",
+    "metrics.json": "88c45c9a33f04e85136977271e75d683bf42a3bf9252e6a72df6a7fc519d0009",
+    "model/_SUCCESS": "672eb8316fec83f94119a4193f9fc552513d56a147502f8be4830e017d817831",
+    "model/manifest.json": "98660515c902f058d821c92115f09edc3d8fe6eed6fc74c7b936e738455f91eb",
+    "resolved_config.yaml": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+    "train_manifest.jsonl": "6ef9c406a7618f6c16af40beb851287d6393e756825960dfdebe5448611a345a",
+    "trainer/trainer_state.json": "914287cb3945f1a28396dd17e23c3174d96cb0ba3aff14f5c3d26963ee6695e4"
+  },
+  "model_seed": 1042,
+  "role": "shadow"
+}

@@ -69,6 +69,13 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
                 "gpu": torch.cuda.get_device_name(0)
                 if torch.cuda.is_available()
                 else None,
+                "gpu_driver": _command_output(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=driver_version",
+                        "--format=csv,noheader",
+                    ]
+                ),
             }
         )
     except Exception as exc:

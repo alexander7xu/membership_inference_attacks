@@ -1,0 +1,25 @@
+{
+  "config_sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+  "file_sha256": {
+    "metrics": "7651927bc3a69126afb8f32a9db5a1f5915ba7841bf9a1c275edf898d21c2487",
+    "scores": "9c49d0da3a125527dae2cbaa3260a05e2656cef42e2bdfa6734a2ea821bdf5ea"
+  },
+  "files": {
+    "metrics": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/attack/metrics.json",
+    "scores": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/attack/online_rmia_scores.jsonl"
+  },
+  "model": "allenai/OLMo-1B-hf",
+  "row_counts": {
+    "candidates": 5248,
+    "population": 1024,
+    "shadow_models": 5
+  },
+  "seed": 42,
+  "source_commit": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "c3d3cd79a4b09aa12187ec462e1776033647b506",
+    "short_commit": "c3d3cd7",
+    "status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh"
+  },
+  "tokenizer": "allenai/OLMo-1B-hf"
+}

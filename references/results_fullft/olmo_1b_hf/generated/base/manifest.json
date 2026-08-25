@@ -1,0 +1,32 @@
+{
+  "config_sha256": "f31870bad273aae2645ff724015975f901a4433bd7a63535d10115359f2bb19b",
+  "file_sha256": {
+    "metrics": "602cecf1684ff6f2541f1b7ea98baca471e1402d80a0750cf02bb3ba54828cac",
+    "private_generated_labels": "8f7f4765f0b83d200db6ce6e4c14b613b9f4da9aa4a399983e5b9c3daca0d6f0",
+    "public_generated": "10af29e098214d1751e5677a8ba4926be91d366b8b96cc3373659670af1323e6",
+    "resolved_config": "f31870bad273aae2645ff724015975f901a4433bd7a63535d10115359f2bb19b"
+  },
+  "files": {
+    "metrics": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base/metrics.json",
+    "private_generated_labels": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base/private_generated_labels.jsonl",
+    "public_generated": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base/public_generated.jsonl",
+    "resolved_config": "outputs/squad_fullft_rmia/formal/olmo_1b_hf/generated/base/resolved_config.yaml"
+  },
+  "generation_source": {
+    "checkpoint": null,
+    "model": "allenai/OLMo-1B-hf@aee7752d9c08ee4775e9b0091426d8410e8f6a89"
+  },
+  "model": "allenai/OLMo-1B-hf",
+  "row_counts": {
+    "private_generated_labels": 3072,
+    "public_generated": 3072
+  },
+  "seed": 42,
+  "source_commit": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "c3d3cd79a4b09aa12187ec462e1776033647b506",
+    "short_commit": "c3d3cd7",
+    "status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh"
+  },
+  "tokenizer": "allenai/OLMo-1B-hf"
+}

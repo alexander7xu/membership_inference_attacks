@@ -1,0 +1,38 @@
+{
+  "config_sha256": "6c476d1d5d74c52c89ae438c57853789483dfadd6c6658433d9d86a6efeeea84",
+  "execution_source_state": {
+    "branch": "master",
+    "commit": "6447cce3dcf07d2797e9a41355b966732611d4f0",
+    "short_commit": "6447cce",
+    "status": "M .gitignore\n M README.md\n M pyproject.toml\n M src/attacker/lira.py\n M src/attacker/rmia.py\n M src/dataset/torchvision_dataset.py\n M src/experiment/records.py\n M src/model/torchvision_model.py\n M src/utils/config_class.py\n M uv.lock\n?? cli/debug_squad_lora_gpu.py\n?? cli/squad_lora_rmia.py\n?? conf/llm_model/\n?? conf/squad_lora_rmia.yaml\n?? references/\n?? scripts/\n?? src/llm_mia/\n?? tests/test_llm_mia_analysis.py\n?? tests/test_llm_mia_data.py\n?? tests/test_llm_mia_scoring.py\n?? tests/test_llm_mia_tokenization.py\n?? tests/test_llm_mia_tracking.py"
+  },
+  "file_sha256": {
+    "private_labels": "d5cb8a15df7897331365e63d0e6ef1029814c2380cdd43ee59318cc956290f41",
+    "public_candidates": "675ead04d77b4b318aa7ac0776d3bd1fd55bcfb3e6862d2675a0db369e00c2c5",
+    "shadow_masks": "8268b1f7ba8b9cd55bd5e1046a6406fad598a039892c4699119bc5d6d77bfb34"
+  },
+  "files": {
+    "private_labels": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/pythia_410m/candidates/private_labels.jsonl",
+    "public_candidates": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/pythia_410m/candidates/public_candidates.jsonl",
+    "shadow_masks": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_lora_rmia/formal/pythia_410m/candidates/shadow_masks.csv"
+  },
+  "mask_hash_correction": {
+    "corrected_sha256": "8268b1f7ba8b9cd55bd5e1046a6406fad598a039892c4699119bc5d6d77bfb34",
+    "previous_recorded_sha256": "0c7a340ea0fe4145a2016e50c0ae5305b219ca2eae744683a8695421b78e0bb0",
+    "validation": "Every mask bit matched candidate content-hash membership in the five saved shadow train manifests; per-shadow IN counts also matched all inclusion summaries. No experiment artifact changed."
+  },
+  "model": "EleutherAI/pythia-410m",
+  "row_counts": {
+    "private_labels": 5248,
+    "public_candidates": 5248,
+    "shadow_models": 5
+  },
+  "seed": 42,
+  "source_snapshot": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "6833dafb1a5814919a9a44fb47673fdb5b0aa57e",
+    "note": "Retrospective commit of the recorded execution worktree.",
+    "plan_commit": "b31db23342202ab001f9fe53bbbb16c0440dcf69"
+  },
+  "tokenizer": "EleutherAI/pythia-410m"
+}

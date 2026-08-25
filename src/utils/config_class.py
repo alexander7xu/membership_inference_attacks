@@ -2,14 +2,14 @@ import dataclasses
 import hashlib
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 import yaml
 from beartype.typing import Iterable
 
 from src.utils.annotation import typechecked
 
-_ConfigLegalValueType: TypeAlias = Any
+type _ConfigLegalValueType = Any
 
 _registered_config_classes = dict[str, type]()
 

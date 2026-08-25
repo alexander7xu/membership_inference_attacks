@@ -7,8 +7,9 @@
 }
 """
 
+from typing import override
+
 import torch
-from typing_extensions import override
 
 from src.attacker.interface import (
     LOGGER,

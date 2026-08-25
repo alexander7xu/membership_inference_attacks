@@ -1,0 +1,10 @@
+{
+  "train/epoch": 1.0,
+  "train/records": 43799.0,
+  "train/total_flos": 4.371470348530483e+16,
+  "train/train_loss": 0.4336281738810682,
+  "train/train_runtime": 573.1284,
+  "train/train_samples_per_second": 76.419,
+  "train/train_steps_per_second": 2.389,
+  "train/trainable_parameters": 6291456.0
+}

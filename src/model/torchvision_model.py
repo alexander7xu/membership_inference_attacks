@@ -10,10 +10,10 @@
 
 from collections.abc import Iterable
 from pathlib import Path
+from typing import override
 
 import torch
 import torchvision
-from typing_extensions import override
 
 from src.model.interface import LOGGER, ModelInterface, _ModelConfigBase
 from src.utils.annotation import FP, Int, T, tensor_typechecked, typechecked

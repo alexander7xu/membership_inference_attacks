@@ -1,0 +1,33 @@
+{
+  "config_sha256": "56655b5506f5462dda786da9fcbb740273e04975beda17719156b8e4422256b8",
+  "file_sha256": {
+    "evaluator_mapping": "de1dd51162ff22f0cf1b7b5109eea93b9892dd1165f9f0fbf7e658e5ffd82bd9",
+    "public_candidates": "121df30b99ae56d75bb3954924b110bb6473c1745c236899e64236fbf37d3d81",
+    "raw_private_provenance": "79e706799735adb07b78190c7b5a164ef69e0d51aa57f089d63589d8b0518194",
+    "raw_public_candidates": "4122ef5f2212901ac2a71f7283ef3b6b02292841d2347855d2fe95f24c0ca796",
+    "shadow_masks": "9107777607dfdbf947d8fc07bd2d975a542476cb8a37083fd25e16284845ae05"
+  },
+  "files": {
+    "evaluator_mapping": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/candidates/evaluator_mapping.jsonl",
+    "public_candidates": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/candidates/public_candidates.jsonl",
+    "raw_private_provenance": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/candidates/raw_private_provenance.jsonl",
+    "raw_public_candidates": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/candidates/raw_public_candidates.jsonl",
+    "shadow_masks": "/hpc2hdd/home/ytang740/LHB/membership_inference_attacks/outputs/squad_fullft_rmia/formal/olmo_1b_hf/candidates/shadow_masks.csv"
+  },
+  "model": "allenai/OLMo-1B-hf",
+  "row_counts": {
+    "evaluator_mapping": 6144,
+    "public_candidates": 5248,
+    "raw_private_provenance": 6144,
+    "raw_public_candidates": 6144,
+    "shadow_models": 5
+  },
+  "seed": 42,
+  "source_commit": {
+    "branch": "codex/squad-lora-rmia",
+    "commit": "c3d3cd79a4b09aa12187ec462e1776033647b506",
+    "short_commit": "c3d3cd7",
+    "status": "?? cli/debug_squad_lora_gpu.py\n?? scripts/debug_gpu_utilization_suite.sh\n?? scripts/debug_inference_gpu_utilization.sh\n?? scripts/debug_training_gpu_utilization.sh"
+  },
+  "tokenizer": "allenai/OLMo-1B-hf"
+}

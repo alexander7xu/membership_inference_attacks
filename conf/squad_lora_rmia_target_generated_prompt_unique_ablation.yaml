@@ -1,0 +1,162 @@
+defaults:
+  - llm_model: pythia_410m
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.output_root}/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+runtime:
+  seed: ???
+  deterministic: false
+
+experiment:
+  purpose: "Isolate target-generated non-member candidates against the prompt-unique gold-IID control."
+  hypothesis: "Replacing prompt-unique source-aligned gold non-members with target-generated completions changes membership separation while target, masks, population, and filler remain fixed."
+
+workflow:
+  stage: smoke
+  profile: smoke
+  force: false
+
+paths:
+  output_root: outputs/squad_lora_rmia_target_generated_prompt_unique_ablation
+  data_dir: data/squad_lora_rmia
+
+reuse:
+  enabled: true
+  mode: target_eval_only
+  source_output_root: outputs/squad_lora_rmia_iid_prompt_unique_control/formal
+  expected_source_shadow_count: 5
+
+control:
+  source_output_root: outputs/squad_lora_rmia_iid_prompt_unique_control/formal
+
+candidate_suite:
+  mode: target_generated_squad_validation
+  group_size: 1024
+  nonmember_group_count: 5
+
+data:
+  squad_dataset: rajpurkar/squad
+  squad_config: plain_text
+  squad_revision: 7b6d24c440a36b6815f21b70d25016731768db1f
+  trivia_dataset: mandarjoshi/trivia_qa
+  trivia_config: rc
+  trivia_revision: 0f7faf33a3908546c6fd5b73a660e0f8ff173c2f
+  target_train_size: 43799
+  auxiliary_pool_size: 43800
+  squad_validation_candidate_size: 1024
+  squad_validation_population_size: 1024
+  trivia_validation_candidate_size: 1024
+  candidate_limit: 1024
+  smoke_candidate_limit: 32
+  eval_limit: null
+  smoke_eval_limit: 32
+
+tokenizer:
+  max_length: 1024
+  preprocessing_workers: 8
+  trust_remote_code: false
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: all-linear
+
+optimizer:
+  name: adamw_torch
+  weight_decay: 0.0
+
+scheduler:
+  name: linear
+  warmup_ratio: 0.03
+
+loss:
+  name: completion_cross_entropy
+
+precision:
+  bf16: true
+
+train:
+  epochs: 1
+  learning_rate: 1.0e-4
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 2
+  warmup_ratio: ${scheduler.warmup_ratio}
+  weight_decay: ${optimizer.weight_decay}
+  logging_steps: 10
+  save_total_limit: 1
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+  dataloader_persistent_workers: true
+  max_steps: null
+  smoke_max_steps: 2
+
+checkpoint:
+  save_strategy: final_adapter_only
+  resume_from_checkpoint: null
+
+shadow:
+  count: 5
+  smoke_count: 1
+  train_size: 43799
+  inclusion_probability: 0.5
+  seed_offset: 1000
+
+eval:
+  batch_size: 96
+  loss_chunk_tokens: 64
+  generation_batch_size: 96
+
+generation:
+  do_sample: false
+  temperature: 0.0
+  max_new_tokens: 64
+  batch_size: 96
+
+attack:
+  method: online_rmia
+  batch_size: 96
+  loss_chunk_tokens: 64
+  gamma: 0.5
+  bootstrap_samples: 2000
+  fpr_thresholds: [0.01, 0.05]
+
+analysis:
+  feature: relative_log_likelihood
+  sample_size_per_group: 512
+  sampling_seed: ${runtime.seed}
+  figure_dpi: 240
+
+wandb:
+  enabled: true
+  mode: offline
+  project: membership-inference-attacks
+  entity: null
+  tags: ["squad", "lora", "online-rmia", "target-generated-ablation", "five-shadows"]
+
+report:
+  resolved_config_filename: resolved_config.yaml
+  experiment_filename: experiment.md
+
+debug:
+  mode: inference_sweep
+  source: squad_validation
+  records: 256
+  batch_sizes: [32, 64, 96]
+  generation_batch_sizes: [32, 64, 96]
+  train_batch_sizes: [8, 16, 32]
+  warmup_steps: 2
+  measure_steps: 8
+  max_train_steps: 20
+  gradient_accumulation_steps: 1
+  dataloader_num_workers: 4
+  max_new_tokens: 64
+  adapter: none
+  output_dir: outputs/squad_lora_rmia/debug_gpu
+  sample_interval_seconds: 0.25

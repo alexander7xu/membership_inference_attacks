@@ -1,0 +1,15 @@
+{
+  "train/epoch": 1.0,
+  "train/final_grad_norm": 11.8125,
+  "train/final_learning_rate": 1.5071590052750567e-07,
+  "train/model_seed": 1042.0,
+  "train/peak_gpu_memory_bytes": 15055451136.0,
+  "train/records": 43799.0,
+  "train/total_flos": 1.0422390978772992e+17,
+  "train/total_parameters": 1176764416.0,
+  "train/train_loss": 0.15532012887903163,
+  "train/train_runtime": 1054.2618,
+  "train/train_samples_per_second": 41.544,
+  "train/train_steps_per_second": 1.299,
+  "train/trainable_parameters": 1176764416.0
+}
